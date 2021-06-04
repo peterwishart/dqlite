@@ -15,6 +15,16 @@
 #include "format.h"
 #include "vfs.h"
 
+/* Byte order */
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __LITTLE_ENDIAN__)
+#define VFS__BIGENDIAN 0
+#elif defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __BIG_ENDIAN__)
+#define VFS__BIGENDIAN 1
+#else
+const int vfsOne = 1;
+#define VFS__BIGENDIAN (*(char *)(&vfsOne) == 0)
+#endif
+
 /* Maximum pathname length supported by this VFS. */
 #define VFS__MAX_PATHNAME 512
 
@@ -330,6 +340,32 @@ static void vfsDatabaseDestroy(struct vfsDatabase *d)
 	sqlite3_free(d);
 }
 
+/*
+ * Comment copied entirely for sqlite source code, it is safe to assume
+ * the value 0x40000000 will never change. dq_sqlite_pending_byte is global
+ * to be able to adapt it in the unittest, the value must never be changed.
+ *
+ * ==BEGIN COPY==
+ * The value of the "pending" byte must be 0x40000000 (1 byte past the
+ * 1-gibabyte boundary) in a compatible database.  SQLite never uses
+ * the database page that contains the pending byte.  It never attempts
+ * to read or write that page.  The pending byte page is set aside
+ * for use by the VFS layers as space for managing file locks.
+ *
+ * During testing, it is often desirable to move the pending byte to
+ * a different position in the file.  This allows code that has to
+ * deal with the pending byte to run on files that are much smaller
+ * than 1 GiB.  The sqlite3_test_control() interface can be used to
+ * move the pending byte.
+ *
+ * IMPORTANT:  Changing the pending byte to any value other than
+ * 0x40000000 results in an incompatible database file format!
+ * Changing the pending byte during operation will result in undefined
+ * and incorrect behavior.
+ * ==END COPY==
+ */
+unsigned dq_sqlite_pending_byte = 0x40000000;
+
 /* Get a page from the given database, possibly creating a new one. */
 static int vfsDatabaseGetPage(struct vfsDatabase *d,
 			      uint32_t page_size,
@@ -341,43 +377,56 @@ static int vfsDatabaseGetPage(struct vfsDatabase *d,
 	assert(d != NULL);
 	assert(pgno > 0);
 
-	/* SQLite should access pages progressively, without jumping more than
-	 * one page after the end. */
-	if (pgno > d->n_pages + 1) {
-		rc = SQLITE_IOERR_WRITE;
-		goto err;
-	}
+        /* SQLite should access pages progressively, without jumping more than
+         * one page after the end unless one would attempt to access a page at
+         * `sqlite_pending_byte` offset, skipping a page is permitted then. */
+        bool pending_byte_page_reached = (page_size * d->n_pages == dq_sqlite_pending_byte);
+        if ((pgno > d->n_pages + 1) && !pending_byte_page_reached) {
+                rc = SQLITE_IOERR_WRITE;
+                goto err;
+        }
 
-	if (pgno == d->n_pages + 1) {
-		/* Create a new page, grow the page array, and append the
-		 * new page to it. */
-		void **pages; /* New page array. */
-
-		*page = sqlite3_malloc64(page_size);
-		if (*page == NULL) {
-			rc = SQLITE_NOMEM;
-			goto err;
-		}
-
-		pages = sqlite3_realloc64(d->pages, sizeof *pages * pgno);
-		if (pages == NULL) {
-			rc = SQLITE_NOMEM;
-			goto err_after_vfs_page_create;
-		}
-
-		/* Append the new page to the new page array. */
-		*(pages + pgno - 1) = *page;
-
-		/* Update the page array. */
-		d->pages = pages;
-		d->n_pages = pgno;
-	} else {
+	if (pgno <= d->n_pages) {
 		/* Return the existing page. */
 		assert(d->pages != NULL);
-		*page = d->pages[pgno - 1];
-	}
+		*page = d->pages[pgno-1];
+                return SQLITE_OK;
+        }
+
+        /* Create a new page, grow the page array, and append the
+         * new page to it. */
+        *page = sqlite3_malloc64(page_size);
+        if (*page == NULL) {
+                rc = SQLITE_NOMEM;
+                goto err;
+        }
+
+        void **pages = sqlite3_realloc64(d->pages, sizeof *pages * pgno);
+        if (pages == NULL) {
+                rc = SQLITE_NOMEM;
+                goto err_after_vfs_page_create;
+        }
+
+        pages[pgno-1] = *page;
+
+        /* Allocate a page to store the pending_byte */
+        if (pending_byte_page_reached) {
+                void *pending_byte_page = sqlite3_malloc64(page_size);
+                if (pending_byte_page == NULL) {
+                        rc = SQLITE_NOMEM;
+                        goto err_after_pending_byte_page;
+                }
+                pages[d->n_pages] = pending_byte_page;
+        }
+
+        /* Update the page array. */
+        d->pages = pages;
+        d->n_pages = pgno;
 
 	return SQLITE_OK;
+
+err_after_pending_byte_page:
+        d->pages = pages;
 
 err_after_vfs_page_create:
 	sqlite3_free(*page);
@@ -1334,7 +1383,7 @@ static void vfsAmendWalIndexHeader(struct vfsDatabase *d)
 
 	assert(*(uint32_t *)(&index[0]) == VFS__WAL_VERSION); /* iVersion */
 	assert(index[12] == 1);                               /* isInit */
-	assert(index[13] == 0);                               /* bigEndCksum */
+	assert(index[13] == VFS__BIGENDIAN);                  /* bigEndCksum */
 
 	*(uint32_t *)(&index[16]) = wal->n_frames;
 	*(uint32_t *)(&index[20]) = n_pages;
@@ -2244,7 +2293,20 @@ static void vfsWalStartHeader(struct vfsWal *w, uint32_t page_size)
 {
 	assert(page_size > 0);
 	uint32_t checksum[2] = {0, 0};
-	vfsPut32(VFS__WAL_MAGIC, &w->hdr[0]);
+	/* SQLite calculates checksums for the WAL header and frames either
+	 * using little endian or big endian byte order when adding up 32-bit
+	 * words. The byte order that should be used is recorded in the WAL file
+	 * header by setting the least significant bit of the magic value stored
+	 * in the first 32 bits. This allows portability of the WAL file across
+	 * hosts with different native byte order.
+	 *
+	 * When creating a brand new WAL file, SQLite will set the byte order
+	 * bit to match the host's native byte order, so checksums are a bit
+	 * more efficient.
+	 *
+	 * In Dqlite the WAL file image is always generated at run time on the
+	 * host, so we can always use the native byte order. */
+	vfsPut32(VFS__WAL_MAGIC | VFS__BIGENDIAN, &w->hdr[0]);
 	vfsPut32(VFS__WAL_VERSION, &w->hdr[4]);
 	vfsPut32(page_size, &w->hdr[8]);
 	vfsPut32(0, &w->hdr[12]);
@@ -2348,6 +2410,20 @@ int VfsAbort(sqlite3_vfs *vfs, const char *filename)
 	return 0;
 }
 
+/* Extract the number of pages field from the database header. */
+static uint32_t vfsDatabaseGetNumberOfPages(struct vfsDatabase *d)
+{
+	uint8_t *page;
+
+	assert(d->n_pages > 0);
+
+	page = d->pages[0];
+
+	/* The page size is stored in the 16th and 17th bytes of the first
+	 * database page (big-endian) */
+	return vfsGet32(&page[28]);
+}
+
 static void vfsDatabaseSnapshot(struct vfsDatabase *d, uint8_t **cursor)
 {
 	uint32_t page_size;
@@ -2355,6 +2431,7 @@ static void vfsDatabaseSnapshot(struct vfsDatabase *d, uint8_t **cursor)
 
 	page_size = vfsDatabaseGetPageSize(d);
 	assert(page_size > 0);
+	assert(d->n_pages == vfsDatabaseGetNumberOfPages(d));
 
 	for (i = 0; i < d->n_pages; i++) {
 		memcpy(*cursor, d->pages[i], page_size);
@@ -2400,6 +2477,10 @@ int VfsSnapshot(sqlite3_vfs *vfs, const char *filename, void **data, size_t *n)
 		*data = NULL;
 		*n = 0;
 		return 0;
+	}
+
+	if (database->n_pages != vfsDatabaseGetNumberOfPages(database)) {
+		return SQLITE_CORRUPT;
 	}
 
 	wal = &database->wal;

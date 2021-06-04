@@ -69,6 +69,10 @@ int dqlite__init(struct dqlite_node *d,
 	raft_set_pre_vote(&d->raft, true);
 	raft_set_max_catch_up_rounds(&d->raft, 100);
 	raft_set_max_catch_up_round_duration(&d->raft, 50 * 1000); /* 50 secs */
+#ifdef __APPLE__
+	d->ready = dispatch_semaphore_create(0);
+	d->stopped = dispatch_semaphore_create(0);
+#else
 	rv = sem_init(&d->ready, 0, 0);
 	if (rv != 0) {
 		/* TODO: better error reporting */
@@ -81,18 +85,24 @@ int dqlite__init(struct dqlite_node *d,
 		rv = DQLITE_ERROR;
 		goto err_after_ready_init;
 	}
+#endif
 
 	rv = pthread_mutex_init(&d->mutex, NULL);
 	assert(rv == 0); /* Docs say that pthread_mutex_init can't fail */
 	QUEUE__INIT(&d->queue);
 	QUEUE__INIT(&d->conns);
+	d->raft_state = RAFT_UNAVAILABLE;
 	d->running = false;
 	d->listener = NULL;
 	d->bind_address = NULL;
 	return 0;
 
 err_after_ready_init:
+#ifdef __APPLE__
+	dispatch_release(d->ready);
+#else
 	sem_destroy(&d->ready);
+#endif
 err_after_raft_fsm_init:
 	fsm__close(&d->raft_fsm);
 err_after_raft_io_init:
@@ -115,10 +125,15 @@ void dqlite__close(struct dqlite_node *d)
 	raft_free(d->listener);
 	rv = pthread_mutex_destroy(&d->mutex); /* This is a no-op on Linux . */
 	assert(rv == 0);
+#ifdef __APPLE__
+	dispatch_release(d->stopped);
+	dispatch_release(d->ready);
+#else
 	rv = sem_destroy(&d->stopped);
 	assert(rv == 0); /* Fails only if sem object is not valid */
 	rv = sem_destroy(&d->ready);
 	assert(rv == 0); /* Fails only if sem object is not valid */
+#endif
 	fsm__close(&d->raft_fsm);
 	uv_loop_close(&d->loop);
 	raftProxyClose(&d->raft_transport);
@@ -145,6 +160,8 @@ int dqlite_node_create(dqlite_node_id id,
 
 	rv = dqlite__init(*t, id, address, data_dir);
 	if (rv != 0) {
+		sqlite3_free(*t);
+		*t = NULL;
 		return rv;
 	}
 
@@ -203,15 +220,33 @@ int dqlite_node_set_bind_address(dqlite_node *t, const char *address)
 			/* Auto bind */
 			len = 0;
 		} else {
-			strcpy(addr_un.sun_path + 1, address + 1);
+			size_t n = sizeof(addr_un.sun_path);
+#if defined(__linux__)
+			/* Linux abstract socket requires \0 in sun_path[0].
+			 * Copy at most n-2 bytes because we start writing at
+			 * byte 1 and want to leave room to '\0' terminate */
+			strncpy(addr_un.sun_path + 1, address + 1, n - 2);
+			addr_un.sun_path[n-1] = '\0';
+#else
+			/* MacOS do not support abstract sockets */
+			strncpy(addr_un.sun_path, address + 1, n - 1);
+			addr_un.sun_path[n-1] = '\0';
+			(void)unlink(addr_un.sun_path);
+#endif
 		}
 		len += sizeof(sa_family_t);
 		addr = (struct sockaddr *)&addr_un;
 	}
-	fd = socket(domain, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	fd = socket(domain, SOCK_STREAM, 0);
 	if (fd == -1) {
 		return DQLITE_ERROR;
 	}
+	rv = fcntl(fd, FD_CLOEXEC);
+	if (rv != 0) {
+		close(fd);
+		return DQLITE_ERROR;
+	}
+
 	if (domain == AF_INET) {
 		int reuse = 1;
 		rv = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
@@ -237,7 +272,7 @@ int dqlite_node_set_bind_address(dqlite_node *t, const char *address)
 	if (domain == AF_INET) {
 		t->bind_address = sqlite3_malloc((int)strlen(address));
 		if (t->bind_address == NULL) {
-			/* TODO: cleanup */
+			close(fd);
 			return DQLITE_NOMEM;
 		}
 		strcpy(t->bind_address, address);
@@ -245,14 +280,16 @@ int dqlite_node_set_bind_address(dqlite_node *t, const char *address)
 		len = sizeof addr_un.sun_path;
 		t->bind_address = sqlite3_malloc((int)len);
 		if (t->bind_address == NULL) {
-			/* TODO: cleanup */
+			close(fd);
 			return DQLITE_NOMEM;
 		}
 		memset(t->bind_address, 0, len);
 		rv = uv_pipe_getsockname((struct uv_pipe_s *)t->listener,
 					 t->bind_address, &len);
 		if (rv != 0) {
-			/* TODO: cleanup */
+			close(fd);
+			sqlite3_free(t->bind_address);
+			t->bind_address = NULL;
 			return DQLITE_ERROR;
 		}
 		t->bind_address[0] = '@';
@@ -323,6 +360,8 @@ static int maybeBootstrap(dqlite_node *d,
 		if (rv == RAFT_CANTBOOTSTRAP) {
 			rv = 0;
 		} else {
+			snprintf(d->errmsg, RAFT_ERRMSG_BUF_SIZE, "raft_bootstrap(): %s",
+				 raft_errmsg(&d->raft));
 			rv = DQLITE_ERROR;
 		}
 		goto out;
@@ -344,6 +383,7 @@ static void raftCloseCb(struct raft *raft)
 	raft_uv_close(&s->raft_io);
 	uv_close((struct uv_handle_s *)&s->stop, NULL);
 	uv_close((struct uv_handle_s *)&s->startup, NULL);
+	uv_close((struct uv_handle_s *)&s->monitor, NULL);
 	uv_close((struct uv_handle_s *)s->listener, NULL);
 }
 
@@ -380,8 +420,12 @@ static void startup_cb(uv_timer_t *startup)
 	struct dqlite_node *d = startup->data;
 	int rv;
 	d->running = true;
+#ifdef __APPLE__
+	dispatch_semaphore_signal(d->ready);
+#else
 	rv = sem_post(&d->ready);
 	assert(rv == 0); /* No reason for which posting should fail */
+#endif
 }
 
 static void listenCb(uv_stream_t *listener, int status)
@@ -425,11 +469,10 @@ static void listenCb(uv_stream_t *listener, int status)
 
 	/* We accept unix socket connections only from the same process. */
 	if (listener->type == UV_NAMED_PIPE) {
+		int fd = stream->io_watcher.fd;
+#if defined(SO_PEERCRED) // Linux
 		struct ucred cred;
-		socklen_t len;
-		int fd;
-		fd = stream->io_watcher.fd;
-		len = sizeof cred;
+		socklen_t len = sizeof(cred);
 		rv = getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len);
 		if (rv != 0) {
 			goto err;
@@ -437,6 +480,21 @@ static void listenCb(uv_stream_t *listener, int status)
 		if (cred.pid != getpid()) {
 			goto err;
 		}
+#elif defined(LOCAL_PEERPID) // BSD
+		pid_t pid = -1;
+		socklen_t len = sizeof(pid);
+		rv = getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len);
+		if (rv != 0) {
+			goto err;
+		}
+		if (pid != getpid()) {
+			goto err;
+		}
+#else
+		// The unix socket connection can't be verified and from
+		// security perspective it's better to block it entirely
+		goto err;
+#endif
 	}
 
 	conn = sqlite3_malloc(sizeof *conn);
@@ -457,6 +515,35 @@ err_after_conn_alloc:
 	sqlite3_free(conn);
 err:
 	uv_close((struct uv_handle_s *)stream, (uv_close_cb)raft_free);
+}
+
+static void monitor_cb(uv_prepare_t *monitor)
+{
+	struct dqlite_node *d = monitor->data;
+	int state = raft_state(&d->raft);
+	/*
+	queue *head;
+	struct conn *conn;
+	*/
+
+	if (state == RAFT_UNAVAILABLE) {
+		return;
+	}
+
+	/* TODO: we should shutdown clients that are performing SQL requests,
+	 * but not the ones which are doing management-requests, such as
+	 * transfer leadership.  */
+	/*
+	if (d->raft_state == RAFT_LEADER && state != RAFT_LEADER) {
+		QUEUE__FOREACH(head, &d->conns)
+		{
+			conn = QUEUE__DATA(head, struct conn, queue);
+			conn__stop(conn);
+		}
+	}
+	*/
+
+	d->raft_state = state;
 }
 
 static int taskRun(struct dqlite_node *d)
@@ -486,13 +573,24 @@ static int taskRun(struct dqlite_node *d)
 	rv = uv_timer_start(&d->startup, startup_cb, 0, 0);
 	assert(rv == 0);
 
+	/* Schedule raft state change monitor. */
+	d->monitor.data = d;
+	rv = uv_prepare_init(&d->loop, &d->monitor);
+	assert(rv == 0);
+	rv = uv_prepare_start(&d->monitor, monitor_cb);
+	assert(rv == 0);
+
 	d->raft.data = d;
 	rv = raft_start(&d->raft);
 	if (rv != 0) {
 		snprintf(d->errmsg, RAFT_ERRMSG_BUF_SIZE, "raft_start(): %s",
 			 raft_errmsg(&d->raft));
 		/* Unblock any client of taskReady */
+#ifdef __APPLE__
+		dispatch_semaphore_signal(d->ready);
+#else
 		sem_post(&d->ready);
+#endif
 		return rv;
 	}
 
@@ -500,8 +598,12 @@ static int taskRun(struct dqlite_node *d)
 	assert(rv == 0);
 
 	/* Unblock any client of taskReady */
+#ifdef __APPLE__
+	dispatch_semaphore_signal(d->ready);
+#else
 	rv = sem_post(&d->ready);
 	assert(rv == 0); /* no reason for which posting should fail */
+#endif
 
 	return 0;
 }
@@ -539,7 +641,11 @@ void dqlite_node_destroy(dqlite_node *d)
 static bool taskReady(struct dqlite_node *d)
 {
 	/* Wait for the ready semaphore */
+#ifdef __APPLE__
+	dispatch_semaphore_wait(d->ready, DISPATCH_TIME_FOREVER);
+#else
 	sem_wait(&d->ready);
+#endif
 	return d->running;
 }
 

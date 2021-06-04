@@ -92,6 +92,27 @@ void gateway__close(struct gateway *g)
 		return 0;                                    \
 	}
 
+#define FAIL_IF_CHECKPOINTING                                                  \
+	{                                                                      \
+		struct sqlite3_file *_file;                                    \
+		int _rv;                                                       \
+		_rv = sqlite3_file_control(g->leader->conn, "main",            \
+					   SQLITE_FCNTL_FILE_POINTER, &_file); \
+		assert(_rv == SQLITE_OK); /* Should never fail */              \
+                                                                               \
+		_rv = _file->pMethods->xShmLock(                               \
+		    _file, 1 /* checkpoint lock */, 1,                         \
+		    SQLITE_SHM_LOCK | SQLITE_SHM_EXCLUSIVE);                   \
+		if (_rv != 0) {                                                \
+			assert(_rv == SQLITE_BUSY);                            \
+			failure(req, SQLITE_BUSY, "checkpoint in progress");   \
+			return 0;                                              \
+		}                                                              \
+		_file->pMethods->xShmLock(                                     \
+		    _file, 1 /* checkpoint lock */, 1,                         \
+		    SQLITE_SHM_UNLOCK | SQLITE_SHM_EXCLUSIVE);                 \
+	}
+
 /* Encode fa failure response and invoke the request callback */
 static void failure(struct handle *req, int code, const char *message)
 {
@@ -180,6 +201,8 @@ static int handle_open(struct handle *req, struct cursor *cursor)
 	}
 	rc = leader__init(g->leader, db, g->raft);
 	if (rc != 0) {
+		sqlite3_free(g->leader);
+		g->leader = NULL;
 		return rc;
 	}
 	response.id = 0;
@@ -263,6 +286,7 @@ static int handle_exec(struct handle *req, struct cursor *cursor)
 	CHECK_LEADER(req);
 	LOOKUP_DB(request.db_id);
 	LOOKUP_STMT(request.stmt_id);
+	FAIL_IF_CHECKPOINTING;
 	(void)response;
 	rv = bind__params(stmt->stmt, cursor);
 	if (rv != 0) {
@@ -345,6 +369,7 @@ static int handle_query(struct handle *req, struct cursor *cursor)
 	CHECK_LEADER(req);
 	LOOKUP_DB(request.db_id);
 	LOOKUP_STMT(request.stmt_id);
+	FAIL_IF_CHECKPOINTING;
 	(void)response;
 	rv = bind__params(stmt->stmt, cursor);
 	if (rv != 0) {
@@ -468,6 +493,7 @@ static int handle_exec_sql(struct handle *req, struct cursor *cursor)
 	START(exec_sql, result);
 	CHECK_LEADER(req);
 	LOOKUP_DB(request.db_id);
+	FAIL_IF_CHECKPOINTING;
 	(void)response;
 	assert(g->req == NULL);
 	assert(g->sql == NULL);
@@ -485,6 +511,7 @@ static int handle_query_sql(struct handle *req, struct cursor *cursor)
 	START(query_sql, rows);
 	CHECK_LEADER(req);
 	LOOKUP_DB(request.db_id);
+	FAIL_IF_CHECKPOINTING;
 	(void)response;
 	rv = sqlite3_prepare_v2(g->leader->conn, request.sql, -1, &g->stmt,
 				&tail);
@@ -581,15 +608,16 @@ static int handle_add(struct handle *req, struct cursor *cursor)
 	}
 	r->gateway = g;
 	r->req.data = r;
+	g->req = req;
 
 	rv = raft_add(g->raft, &r->req, request.id, request.address,
 		      raftChangeCb);
 	if (rv != 0) {
+		g->req = NULL;
 		sqlite3_free(r);
 		failure(req, translateRaftErrCode(rv), raft_strerror(rv));
 		return 0;
 	}
-	g->req = req;
 
 	return 0;
 }
@@ -637,15 +665,16 @@ static int handle_assign(struct handle *req, struct cursor *cursor)
 	}
 	r->gateway = g;
 	r->req.data = r;
+	g->req = req;
 
 	rv = raft_assign(g->raft, &r->req, request.id,
 			 translateDqliteRole((int)role), raftChangeCb);
 	if (rv != 0) {
+		g->req = NULL;
 		sqlite3_free(r);
 		failure(req, translateRaftErrCode(rv), raft_strerror(rv));
 		return 0;
 	}
-	g->req = req;
 
 	return 0;
 }
@@ -666,14 +695,15 @@ static int handle_remove(struct handle *req, struct cursor *cursor)
 	}
 	r->gateway = g;
 	r->req.data = r;
+	g->req = req;
 
 	rv = raft_remove(g->raft, &r->req, request.id, raftChangeCb);
 	if (rv != 0) {
+		g->req = NULL;
 		sqlite3_free(r);
 		failure(req, translateRaftErrCode(rv), raft_strerror(rv));
 		return 0;
 	}
-	g->req = req;
 
 	return 0;
 }
@@ -718,6 +748,7 @@ oom:
 
 static int handle_dump(struct handle *req, struct cursor *cursor)
 {
+	bool err = true;
 	struct gateway *g = req->gateway;
 	sqlite3_vfs *vfs;
 	void *cur;
@@ -771,7 +802,7 @@ static int handle_dump(struct handle *req, struct cursor *cursor)
 	rv = dumpFile(request.filename, database, n_database, req->buffer);
 	if (rv != 0) {
 		failure(req, rv, "failed to dump database");
-		return 0;
+		goto out_free_data;
 	}
 
 	strcpy(filename, request.filename);
@@ -779,14 +810,18 @@ static int handle_dump(struct handle *req, struct cursor *cursor)
 	rv = dumpFile(filename, wal, n_wal, req->buffer);
 	if (rv != 0) {
 		failure(req, rv, "failed to dump wal file");
-		return 0;
+		goto out_free_data;
 	}
 
+	err = false;
+
+out_free_data:
 	if (data != NULL) {
 		raft_free(data);
 	}
 
-	req->cb(req, 0, DQLITE_RESPONSE_FILES);
+	if (!err)
+		req->cb(req, 0, DQLITE_RESPONSE_FILES);
 
 	return 0;
 }
@@ -902,14 +937,15 @@ static int handle_transfer(struct handle *req, struct cursor *cursor)
 		return DQLITE_NOMEM;
 	}
 	r->data = g;
+	g->req = req;
 
 	rv = raft_transfer(g->raft, r, request.id, raftTransferCb);
 	if (rv != 0) {
+		g->req = NULL;
 		sqlite3_free(r);
 		failure(req, translateRaftErrCode(rv), raft_strerror(rv));
 		return 0;
 	}
-	g->req = req;
 
 	return 0;
 }

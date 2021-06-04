@@ -60,6 +60,12 @@ static int openConnection(const char *filename,
 		goto err_after_open;
 	}
 
+	rc = sqlite3_exec(*conn, "PRAGMA wal_autocheckpoint=0", NULL, NULL,
+			  &msg);
+	if (rc != SQLITE_OK) {
+		goto err_after_open;
+	}
+
 	rc =
 	    sqlite3_db_config(*conn, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, NULL);
 	if (rc != SQLITE_OK) {
@@ -132,7 +138,15 @@ static void leaderCheckpointApplyCb(struct raft_apply *req,
 {
 	struct leader *l = req->data;
 	(void)result;
-	(void)status; /* TODO: log a warning in case of errors. */
+	/* In case of failure, release the chekcpoint lock. */
+	if (status != 0) {
+		struct sqlite3_file *file;
+		sqlite3_file_control(l->conn, "main", SQLITE_FCNTL_FILE_POINTER,
+				     &file);
+		file->pMethods->xShmLock(
+		    file, 1 /* checkpoint lock */, 1,
+		    SQLITE_SHM_UNLOCK | SQLITE_SHM_EXCLUSIVE);
+	}
 	l->inflight = NULL;
 	l->db->tx_id = 0;
 	l->exec->done = true;
@@ -142,7 +156,7 @@ static void leaderCheckpointApplyCb(struct raft_apply *req,
 /* Attempt to perform a checkpoint if possible. */
 static bool leaderMaybeCheckpoint(struct leader *l)
 {
-	struct sqlite3_file *main;
+	struct sqlite3_file *main_f;
 	struct sqlite3_file *wal;
 	struct raft_buffer buf;
 	struct command_checkpoint command;
@@ -171,21 +185,21 @@ static bool leaderMaybeCheckpoint(struct leader *l)
 
 	/* Get the database file associated with this connection */
 	rv = sqlite3_file_control(l->conn, "main", SQLITE_FCNTL_FILE_POINTER,
-				  &main);
+				  &main_f);
 	assert(rv == SQLITE_OK); /* Should never fail */
 
 	/* Get the first SHM region, which contains the WAL header. */
-	rv = main->pMethods->xShmMap(main, 0, 0, 0, &region);
+	rv = main_f->pMethods->xShmMap(main_f, 0, 0, 0, &region);
 	assert(rv == SQLITE_OK); /* Should never fail */
 
-	rv = main->pMethods->xShmUnmap(main, 0);
+	rv = main_f->pMethods->xShmUnmap(main_f, 0);
 	assert(rv == SQLITE_OK); /* Should never fail */
 
 	/* Try to acquire all locks. */
 	for (i = 0; i < SQLITE_SHM_NLOCK; i++) {
 		int flags = SQLITE_SHM_LOCK | SQLITE_SHM_EXCLUSIVE;
 
-		rv = main->pMethods->xShmLock(main, i, 1, flags);
+		rv = main_f->pMethods->xShmLock(main_f, i, 1, flags);
 		if (rv == SQLITE_BUSY) {
 			/* There's a reader. Let's postpone the checkpoint
 			 * for now. */
@@ -195,7 +209,7 @@ static bool leaderMaybeCheckpoint(struct leader *l)
 		/* Not locked. Let's release the lock we just
 		 * acquired. */
 		flags = SQLITE_SHM_UNLOCK | SQLITE_SHM_EXCLUSIVE;
-		main->pMethods->xShmLock(main, i, 1, flags);
+		main_f->pMethods->xShmLock(main_f, i, 1, flags);
 	}
 
 	/* Attempt to perfom a checkpoint across all nodes.
@@ -207,10 +221,15 @@ static bool leaderMaybeCheckpoint(struct leader *l)
 	if (rv != 0) {
 		goto abort;
 	}
+
 	rv = raft_apply(l->raft, &l->apply, &buf, 1, leaderCheckpointApplyCb);
 	if (rv != 0) {
 		goto abort_after_command_encode;
 	}
+
+	rv = main_f->pMethods->xShmLock(main_f, 1 /* checkpoint lock */, 1,
+				      SQLITE_SHM_LOCK | SQLITE_SHM_EXCLUSIVE);
+	assert(rv == 0);
 
 	return true;
 
