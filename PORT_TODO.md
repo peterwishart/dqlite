@@ -901,8 +901,38 @@ item is done, not whether):
     `off_t` comparison fix is unguarded, so re-run `unit-test` 320/320 +
     `integration server/`.
 
-- [ ] **W6 — MAJOR: unguarded Linux behaviour changes in a "Windows build" commit.**
+- [x] **W6 — MAJOR: unguarded Linux behaviour changes in a "Windows build" commit.**
       Five distinct changes; each needs its own decision and its own commit.
+      **DONE (2026-07-29/30), five commits (a–e).**
+      (a) KAIO-in-threadpool RESTORED as the Linux `!async` behaviour:
+      `threadpool = uvWriterThreadpoolForced()` only, portable backend
+      reachable on KAIO builds solely via `DQLITE_IO_BACKEND=threadpool`.
+      Direct proof the mechanism had diverged: `UvWriterSubmit/noResources`
+      on tmpfs FAILED at HEAD (portable write succeeded where upstream KAIO
+      fails RAFT_TOOMANY), passes after. tmpfs benchmark (WSL2): mechanisms
+      performance-equivalent within noise (numbers in the commit message).
+      Full base-vs-mod WSL matrix (default / tmpfs / threadpool-forced /
+      no-direct / DISABLE_KAIO build): zero mod-only regressions; two
+      KAIO-behaviour tests gained skip guards. Windows unaffected (always
+      portable). (b) Tie-break KEPT; the missing half added — two pinning
+      tests (voter + standby promotion among fully-equivalent candidates →
+      ascending id) pass on glibc (stable mergesort) and UCRT (unstable
+      introsort) alike; standalone upstream argument in the commit message.
+      (c) Switches KEPT, silence removed: one-time stderr warning when any of
+      the three is honoured (stderr because both tracers are opt-in/disabled
+      by default; verified each fires exactly once via munit
+      `--no-fork --show-stderr` — munit captures test stderr, so normal suite
+      output hides them by design). **Flagged for maintainers, not decided:**
+      whether release builds should compile the switches out (test/CI-only
+      build option). (d) Stress params reverted to upstream (count 1000,
+      readers {0,1,4,16}); the aliasing-bug load (count=1500, writers=4,
+      readers=32, databases=4) kept as ONE commented extra parameter set.
+      Suite count 45→46 run (+3 skips) on both platforms. (e) Leak fix KEPT;
+      audit confirmed no public API exposes the internal node; ownership
+      contract documented at `dqlite_server_start` declaration + destroy
+      site. Verified totals: Windows unit 321/321 (+2 new tests), raft-uv-unit
+      20/20, raft-uv-integration 212/212, server 8/8, cluster 23/23, stress
+      46/46; Linux (WSL) unit 322/322, stress 46/46.
   - **(a) The `!async` path on Linux changed mechanism.**
     `src/raft/uv_writer.c:709` — `threadpool = uvWriterThreadpoolForced() ||
     !async` — routes `!async` to the portable `uv_fs_write` backend. Upstream
