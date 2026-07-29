@@ -303,6 +303,15 @@ typedef unsigned short sa_family_t;
 #endif
 int fcntl(int fd, int cmd, ...);
 
+/* dqliteWinSocketsInit(): idempotent, process-wide WSAStartup (Winsock 2.2),
+ * implemented in compat/win/compat_win.c. Called from the library's public
+ * object-creation entry points (dqlite_node_create, dqlite_server_create in
+ * src/server.c) so Winsock is initialised before any raw socket()/
+ * getaddrinfo() call the library makes -- structurally, not as a link-order
+ * side effect (PORT_TODO.md W8). Declared here in the prelude so the guarded
+ * call sites in shared sources need no Windows-only #include. */
+void dqliteWinSocketsInit(void);
+
 /* accept4(2) (Linux): accept() plus an atomic flag-set on the new socket.
  * Winsock has only accept(); wrap it and drop the flags. SOCK_CLOEXEC and
  * SOCK_NONBLOCK are shimmed to 0 (above), so no flag work is required today --

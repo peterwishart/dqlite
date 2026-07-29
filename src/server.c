@@ -220,6 +220,12 @@ int dqlite_node_create(dqlite_node_id id,
 		       const char *data_dir,
 		       dqlite_node **t)
 {
+#ifdef _WIN32
+	/* Winsock must be up before any of the raw socket()/getaddrinfo()
+	 * calls reachable from a node (src/transport.c, src/lib/addr.c).
+	 * Idempotent one-shot; see compat/win/compat_win.c. */
+	dqliteWinSocketsInit();
+#endif
 	*t = sqlite3_malloc(sizeof **t);
 	if (*t == NULL) {
 		return DQLITE_NOMEM;
@@ -1591,6 +1597,13 @@ int dqlite_server_create(const char *path, dqlite_server **server)
 {
 	int rv;
 
+#ifdef _WIN32
+	/* Winsock must be up before any of the raw socket()/getaddrinfo()
+	 * calls reachable from a server (src/client/protocol.c via
+	 * transportDefaultConnect, src/lib/addr.c). Idempotent one-shot; see
+	 * compat/win/compat_win.c. */
+	dqliteWinSocketsInit();
+#endif
 	*server = callocChecked(1, sizeof **server);
 	rv = pthread_cond_init(&(*server)->cond, NULL);
 	dqlite_assert(rv == 0);

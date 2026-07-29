@@ -494,6 +494,12 @@ if(DQLITE_BUILD_TESTS)
       # dllimport) on declarations they also define, and no import thunks for
       # symbols resolved statically. WIN32-only; no effect on Linux/macOS.
       target_compile_definitions(${name} PRIVATE DQLITE_STATIC)
+      # Per-binary test-harness process setup: WSAStartup for the tests' raw
+      # socket calls + quiet, non-interactive CRT abort/report behaviour (see
+      # test/lib/win.c). Compiled into the executable itself, NOT into the
+      # dqlite_test archive: an archive member containing only a constructor
+      # and no referenced symbol would never be pulled in by the linker.
+      target_sources(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test/lib/win.c)
     endif()
     add_test(NAME ${name} COMMAND ${name})
   endfunction()

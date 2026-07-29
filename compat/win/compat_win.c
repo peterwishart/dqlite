@@ -10,6 +10,8 @@
  * prelude.
  *
  * Behavioural summary:
+ *  - dqliteWinSocketsInit(): idempotent process-wide WSAStartup, called from
+ *               the library's public entry points (see the function comment).
  *  - fcntl():   implements NO command -- always fails with ENOSYS. See the
  *               function comment; no Windows-compiled code calls it.
  *  - statfs()/fstatfs(): report a generic, tmpfs-like filesystem so the raft
@@ -50,40 +52,51 @@
 #include <sys/utsname.h>
 #include <sys/vfs.h>
 
-#ifdef _DEBUG
-#include <crtdbg.h>
-#endif
+/* --------------------------------------------------------------- Winsock */
 
-/* Keep automated/CI test runs non-interactive. By default the Windows debug CRT
- * pops a modal dialog on a failed assert()/abort() or a heap error, which blocks
- * unattended runs. Route those diagnostics to stderr and suppress the abort()
- * message box instead. Runs once at startup (the object is always linked because
- * the raft/test code references the POSIX shims below). Debug-only reporting
- * changes; no effect on release builds or on program behaviour/correctness. */
-__attribute__((constructor)) static void dqliteWinQuietCrt(void)
+/* dqliteWinSocketsInit(): idempotent, process-wide Winsock initialisation.
+ *
+ * dqlite makes raw socket()/getaddrinfo()/connect() calls (src/transport.c,
+ * src/lib/addr.c, src/client/protocol.c) that run independently of libuv's
+ * own internal WSAStartup, and getaddrinfo() in particular fails with
+ * WSANOTINITIALISED if Winsock has not been started. The library's public
+ * object-creation entry points -- dqlite_node_create and
+ * dqlite_server_create, through one of which every socket-using code path in
+ * the library is reached -- call this helper (declared in the forced prelude,
+ * so the guarded call sites in src/server.c need no extra include), making
+ * Winsock initialisation STRUCTURAL rather than a side effect of linking.
+ *
+ * An earlier iteration did the WSAStartup in a library constructor in this
+ * file instead. That only ran if the linker happened to pull compat_win.obj
+ * out of the static archive to resolve some other symbol, and the same
+ * constructor also mutated host-process-global CRT abort/report state that
+ * belongs to the TEST harness, not to a library embedded in someone else's
+ * process (PORT_TODO.md W8). The CRT quieting now lives in test/lib/win.c,
+ * linked into test binaries only.
+ *
+ * One-shot rather than refcounted: WSAStartup runs exactly once per process
+ * (INIT_ONCE) and the matching WSACleanup is intentionally omitted. Process
+ * teardown reclaims Winsock anyway, libuv handles its own reference the same
+ * way (uv__once_init never cleans up either), and a cleanup tied to object
+ * destruction could pull the mat out from under libuv or the host
+ * application's own sockets. Requesting Winsock 2.2. */
+
+static BOOL CALLBACK dqliteWinSocketsInitOnce(PINIT_ONCE once,
+					      PVOID param,
+					      PVOID *ctx)
 {
-	/* Initialise Winsock process-wide before any socket call. dqlite makes
-	 * raw socket()/getaddrinfo()/connect() calls (src/transport.c,
-	 * src/lib/addr.c, src/client/protocol.c) that run independently of
-	 * libuv's own internal WSAStartup, and getaddrinfo() in particular fails
-	 * with WSANOTINITIALISED if Winsock has not been started. WSAStartup is
-	 * reference-counted, so an extra init here is harmless even though libuv
-	 * also initialises Winsock. Requesting Winsock 2.2. The matching
-	 * WSACleanup is intentionally omitted: process teardown reclaims it, and
-	 * a premature cleanup could pull the mat out from under libuv. */
-	{
-		WSADATA wsa_data;
-		(void)WSAStartup(MAKEWORD(2, 2), &wsa_data);
-	}
+	WSADATA wsa_data;
+	(void)once;
+	(void)param;
+	(void)ctx;
+	(void)WSAStartup(MAKEWORD(2, 2), &wsa_data);
+	return TRUE;
+}
 
-	_set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-#ifdef _DEBUG
-	int modes[] = { _CRT_WARN, _CRT_ERROR, _CRT_ASSERT };
-	for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
-		_CrtSetReportMode(modes[i], _CRTDBG_MODE_FILE);
-		_CrtSetReportFile(modes[i], _CRTDBG_FILE_STDERR);
-	}
-#endif
+void dqliteWinSocketsInit(void)
+{
+	static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+	InitOnceExecuteOnce(&once, dqliteWinSocketsInitOnce, NULL, NULL);
 }
 
 /* TMPFS_MAGIC: uv_fs.c's probeDirectIO() treats this filesystem type as one
