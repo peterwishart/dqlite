@@ -18,10 +18,13 @@
 
 #include "test/lib/munit.h"
 
-#ifdef DQLITE_STATIC_LIBC
+#if defined(DQLITE_STATIC_LIBC) || defined(_WIN32)
 
 /* Trickery to cause tests that use getaddrinfo result injection to be skipped
- * when building with WITH_STATIC_DEPS. */
+ * when building with WITH_STATIC_DEPS, or on Windows. The injection relies on
+ * dlsym(RTLD_NEXT) ELF symbol interposition of getaddrinfo/freeaddrinfo, which
+ * is unavailable on Windows (and defining those names would clash with ws2_32),
+ * so such tests cannot intercept resolution there and are skipped. */
 #define ADDRINFO_TEST(S, C, SETUP, TEAR_DOWN, OPTIONS, PARAMS) \
     TEST(S, C, SETUP, TEAR_DOWN, OPTIONS, PARAMS) \
     { \

@@ -4,7 +4,23 @@
 #include "../lib/uv.h"
 #include "append_helpers.h"
 
+#include <string.h>
 #include <unistd.h>
+
+#if defined(DQLITE_HAVE_KAIO)
+/* True when the portable libuv-threadpool write backend is in effect, in which
+ * case kernel-AIO-specific test cases do not apply. The portable backend is
+ * selected either when explicitly forced via DQLITE_IO_BACKEND=threadpool, or
+ * when async kernel I/O is unavailable, which DQLITE_IO_NO_DIRECT forces on
+ * Linux (async=false => auto-selected portable backend). */
+static bool uvThreadpoolBackend(void)
+{
+	const char *backend = getenv("DQLITE_IO_BACKEND");
+	const char *no_direct = getenv("DQLITE_IO_NO_DIRECT");
+	return (backend != NULL && strcmp(backend, "threadpool") == 0) ||
+	       (no_direct != NULL && no_direct[0] != '\0');
+}
+#endif /* DQLITE_HAVE_KAIO */
 
 /* Maximum number of blocks a segment can have */
 #define MAX_SEGMENT_BLOCKS 4
@@ -190,6 +206,20 @@ TEST(append, finalizeSegment, setUp, tearDown, 0, NULL)
     while (!DirHasFile(f->dir, "open-4")) {
         LOOP_RUN(1);
     }
+#ifdef _WIN32
+    /* Preparing the next open segment and finalizing the full one are
+     * independent async operations on the libuv threadpool. On Windows the
+     * prepare (open-4) can appear before the finalize (open-1 ->
+     * 0000000000000001-0000000000000004) completes, so also wait for the
+     * finalized file. See the append/counter comment for the full rationale. */
+    {
+        int __n = 0;
+        while (!DirHasFile(f->dir, "0000000000000001-0000000000000004") &&
+               __n++ < 100) {
+            LOOP_RUN(1);
+        }
+    }
+#endif
     munit_assert_true(DirHasFile(f->dir, "0000000000000001-0000000000000004"));
     munit_assert_false(DirHasFile(f->dir, "open-1"));
     munit_assert_true(DirHasFile(f->dir, "open-4"));
@@ -407,6 +437,23 @@ TEST(append, counter, setUp, tearDown, 0, NULL)
     for (i = 0; i < 10; i++) {
         APPEND(1, size);
     }
+#ifdef _WIN32
+    /* Segment finalization (truncate + rename of a full open segment) runs on
+     * the libuv threadpool and completes asynchronously with respect to the
+     * append callback. On Linux the finalizes have already completed by the
+     * time the last append returns; on Windows threadpool scheduling lets them
+     * lag, so pump the loop until the finalized segment files appear (bounded).
+     * Finalization is serialized in order, so waiting for the second closed
+     * segment implies the first is done too. Same wait pattern as
+     * append/prepareSegments. */
+    {
+        int __n = 0;
+        while (!DirHasFile(f->dir, "0000000000000004-0000000000000006") &&
+               __n++ < 100) {
+            LOOP_RUN(1);
+        }
+    }
+#endif
     munit_assert_true(DirHasFile(f->dir, "0000000000000001-0000000000000003"));
     munit_assert_true(DirHasFile(f->dir, "0000000000000004-0000000000000006"));
     munit_assert_true(DirHasFile(f->dir, "open-4"));
@@ -500,6 +547,7 @@ TEST(append, noSpaceResolved, setUp, tearDownDeps, 0, DirTmpfsParams)
     return MUNIT_OK;
 }
 
+#if defined(DQLITE_HAVE_KAIO)
 /* An error occurs while performing a write. */
 TEST(append, writeError, setUp, tearDown, 0, NULL)
 {
@@ -516,6 +564,7 @@ TEST(append, writeError, setUp, tearDown, 0, NULL)
     AioDestroy(ctx);
     return MUNIT_OK;
 }
+#endif /* DQLITE_HAVE_KAIO */
 
 static char *oomHeapFaultDelay[] = {"1", /* FIXME "2", */ NULL};
 static char *oomHeapFaultRepeat[] = {"1", NULL};
@@ -590,12 +639,18 @@ TEST(append, currentSegment, setUp, tearDownDeps, 0, NULL)
     return MUNIT_OK;
 }
 
+#if defined(DQLITE_HAVE_KAIO)
 /* The kernel has ran out of available AIO events. */
 TEST(append, ioSetupError, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     aio_context_t ctx = 0;
     int rv;
+    /* The portable backend does not use kernel AIO, so io_setup cannot fail;
+     * this failure mode is specific to the AIO backend. */
+    if (uvThreadpoolBackend()) {
+        return MUNIT_SKIP;
+    }
     rv = AioFill(&ctx, 0);
     if (rv != 0) {
         return MUNIT_SKIP;
@@ -604,6 +659,7 @@ TEST(append, ioSetupError, setUp, tearDown, 0, NULL)
                    "setup writer for open-1: AIO events user limit exceeded");
     return MUNIT_OK;
 }
+#endif /* DQLITE_HAVE_KAIO */
 
 /*===========================================================================
   Test interaction between UvAppend and UvBarrier

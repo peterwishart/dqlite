@@ -141,6 +141,18 @@ void test_heap_setup(const MunitParameter params[], void *user_data)
 	(void)params;
 	(void)user_data;
 
+	/* sqlite3_config() may only be called while SQLite is uninitialized
+	 * (before sqlite3_initialize() or after sqlite3_shutdown()). On POSIX
+	 * munit fork()s a fresh child per test so SQLite always starts
+	 * uninitialized here and this shutdown is a harmless no-op. On Windows
+	 * munit has no fork() and runs the whole suite in one process, so a
+	 * prior test/suite that opened a database (e.g. the high-level "server"
+	 * integration suite, which never shuts SQLite down) leaves SQLite
+	 * initialized; without this reset the sqlite3_config() calls below fail
+	 * with SQLITE_MISUSE and cascade into every subsequent heap-using test.
+	 * sqlite3_shutdown() returns OK on an already-uninitialized library. */
+	sqlite3_shutdown();
+
 	/* Install the faulty malloc implementation */
 	rc = sqlite3_config(SQLITE_CONFIG_GETMALLOC, &mem);
 	if (rc != SQLITE_OK) {

@@ -7,7 +7,19 @@
 #include <stdint.h>
 
 #ifndef DQLITE_API
-# if defined(__has_attribute) && __has_attribute(visibility)
+# if defined(_WIN32)
+   /* Windows DLL: export the public API when building dqlite itself
+    * (DQLITE_BUILDING, set by the build system for the library sources),
+    * import it when a consumer includes this header. DQLITE_STATIC is the
+    * opt-out for consumers linking the static archive, who want neither. */
+#  if defined(DQLITE_STATIC)
+#   define DQLITE_API
+#  elif defined(DQLITE_BUILDING)
+#   define DQLITE_API __declspec(dllexport)
+#  else
+#   define DQLITE_API __declspec(dllimport)
+#  endif
+# elif defined(__has_attribute) && __has_attribute(visibility)
 #  define DQLITE_API __attribute__((visibility("default")))
 # else
 #  define DQLITE_API

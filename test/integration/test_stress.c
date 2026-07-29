@@ -8,12 +8,12 @@
 
 SUITE(stress);
 
-#define READ_COUNT 1000
-#define WRITE_COUNT 1000
+#define READ_COUNT 1500
+#define WRITE_COUNT 1500
 
 static char *databases[] = { "1", "2", "4", NULL };
 static char *writers[] = { "0", "1", "2", "4", NULL };
-static char *readers[] = { "0", "1", "4", "16", NULL };
+static char *readers[] = { "0", "1", "4", "32", NULL };
 
 static MunitParameterEnum stress_params[] = {
 	{ "writers", writers },

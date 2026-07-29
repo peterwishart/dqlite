@@ -6,6 +6,18 @@
 #include "../../lib/runner.h"
 #include "../../lib/uv.h"
 
+/* The client end of the socketpair is a Winsock SOCKET on Windows, where
+ * write()/close() do not work on sockets; route through send()/closesocket().
+ * On POSIX these map to the plain calls. */
+#ifdef _WIN32
+#define CLIENT_SOCK_SEND(fd, buf, n) \
+	send((SOCKET)(uintptr_t)(fd), (const char *)(buf), (int)(n), 0)
+#define CLIENT_SOCK_CLOSE(fd) closesocket((SOCKET)(uintptr_t)(fd))
+#else
+#define CLIENT_SOCK_SEND(fd, buf, n) write((fd), (buf), (n))
+#define CLIENT_SOCK_CLOSE(fd) close(fd)
+#endif
+
 TEST_MODULE(lib_transport);
 
 /******************************************************************************
@@ -74,7 +86,7 @@ static void tear_down(void *data)
 {
 	struct fixture *f = data;
 	int rv;
-	rv = close(f->client);
+	rv = CLIENT_SOCK_CLOSE(f->client);
 	munit_assert_int(rv, ==, 0);
 	transport__close(&f->transport, NULL);
 	test_uv_stop(&f->loop);
@@ -89,8 +101,11 @@ static void tear_down(void *data)
  *
  ******************************************************************************/
 
-/* Allocate a libuv buffer with the given amount of bytes. */
-#define BUF_ALLOC(N) {munit_malloc(N), N};
+/* Allocate a libuv buffer with the given amount of bytes. Use uv_buf_init()
+ * rather than a positional aggregate initialiser: uv_buf_t has a different
+ * field order on Windows ({ULONG len; char *base;}) than on POSIX
+ * ({char *base; size_t len;}), so a positional {base, len} would mis-assign. */
+#define BUF_ALLOC(N) uv_buf_init(munit_malloc(N), N)
 
 /* Start reading into the current buffer */
 #define READ(BUF)                                                   \
@@ -118,7 +133,7 @@ static void tear_down(void *data)
 		for (i_ = 0; i_ < N; i_++) {     \
 			buf_[i_] = i_ + 1;       \
 		}                                \
-		rv_ = write(f->client, buf_, N); \
+		rv_ = CLIENT_SOCK_SEND(f->client, buf_, N); \
 		munit_assert_int(rv_, ==, N);    \
 		free(buf_);                      \
 	}

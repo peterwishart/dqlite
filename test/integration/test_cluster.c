@@ -130,7 +130,14 @@ TEST(cluster, dataOnNewNode, setUp, tearDown, 0, cluster_params)
 	long n_records =
 	    strtol(munit_parameters_get(params, "num_records"), NULL, 0);
 	unsigned id = 2;
+#ifdef _WIN32
+	/* The node binds a dynamic TCP loopback address on Windows (no
+	 * abstract-namespace AF_UNIX), so join it at its real address rather
+	 * than the Linux "@ID" literal. On Linux this field is exactly "@2". */
+	const char *address = f->servers[id - 1].address;
+#else
 	const char *address = "@2";
+#endif
 	int rv;
 
 	HANDSHAKE;
@@ -290,7 +297,14 @@ TEST(cluster, modifyingQuery, setUp, tearDown, 0, cluster_params)
 	    strtol(munit_parameters_get(params, "num_records"), NULL, 0);
 	char sql[128];
 	unsigned id = 2;
+#ifdef _WIN32
+	/* The node binds a dynamic TCP loopback address on Windows (no
+	 * abstract-namespace AF_UNIX), so join it at its real address rather
+	 * than the Linux "@ID" literal. On Linux this field is exactly "@2". */
+	const char *address = f->servers[id - 1].address;
+#else
 	const char *address = "@2";
+#endif
 
 	HANDSHAKE;
 	OPEN;
@@ -333,7 +347,14 @@ TEST(cluster, modifyingQuerySql, setUp, tearDown, 0, cluster_params)
 	    strtol(munit_parameters_get(params, "num_records"), NULL, 0);
 	char sql[128];
 	unsigned id = 2;
+#ifdef _WIN32
+	/* The node binds a dynamic TCP loopback address on Windows (no
+	 * abstract-namespace AF_UNIX), so join it at its real address rather
+	 * than the Linux "@ID" literal. On Linux this field is exactly "@2". */
+	const char *address = f->servers[id - 1].address;
+#else
 	const char *address = "@2";
+#endif
 
 	HANDSHAKE;
 	OPEN;

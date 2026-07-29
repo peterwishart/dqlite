@@ -1,5 +1,7 @@
 #include "syscall.h"
 
+#if defined(DQLITE_HAVE_KAIO)
+
 #if HAVE_LINUX_AIO_ABI_H || HAVE_LINUX_IO_URING_H
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -56,3 +58,5 @@ int io_uring_enter(int fd,
 			    flags, sig, _NSIG / 8);
 }
 #endif
+
+#endif /* DQLITE_HAVE_KAIO */

@@ -79,6 +79,49 @@ int transport__stream(struct uv_loop_s *loop,
 	struct uv_tcp_s *tcp;
 	int rv;
 
+#ifdef _WIN32
+	/* On Windows the incoming descriptor is one of two things:
+	 *
+	 *  - a Winsock SOCKET (the TCP transport widens it into an int). This is
+	 *    NOT a CRT file descriptor, so uv_guess_handle() -- which calls
+	 *    _get_osfhandle() internally -- returns UV_UNKNOWN_HANDLE for it.
+	 *  - a CRT file descriptor wrapping a named-pipe HANDLE (the local
+	 *    "@name" transport opens the pipe with CreateFile + _open_osfhandle).
+	 *    For a real CRT fd, uv_guess_handle() -> GetFileType() -> FILE_TYPE_PIPE
+	 *    returns UV_NAMED_PIPE.
+	 *
+	 * So UV_NAMED_PIPE unambiguously selects the pipe path; everything else
+	 * (i.e. UV_UNKNOWN_HANDLE for a raw SOCKET) is the TCP path, handed to
+	 * uv_tcp_open(), which takes a uv_os_sock_t (== SOCKET). */
+	if (uv_guess_handle(fd) == UV_NAMED_PIPE) {
+		pipe = raft_malloc(sizeof *pipe);
+		if (pipe == NULL) {
+			return DQLITE_NOMEM;
+		}
+		rv = uv_pipe_init(loop, pipe, 0);
+		dqlite_assert(rv == 0);
+		rv = uv_pipe_open(pipe, fd);
+		if (rv != 0) {
+			raft_free(pipe);
+			return TRANSPORT__BADSOCKET;
+		}
+		*stream = (struct uv_stream_s *)pipe;
+		return 0;
+	}
+	tcp = raft_malloc(sizeof *tcp);
+	if (tcp == NULL) {
+		return DQLITE_NOMEM;
+	}
+	rv = uv_tcp_init(loop, tcp);
+	dqlite_assert(rv == 0);
+	rv = uv_tcp_open(tcp, (uv_os_sock_t)(uintptr_t)fd);
+	if (rv != 0) {
+		raft_free(tcp);
+		return TRANSPORT__BADSOCKET;
+	}
+	*stream = (struct uv_stream_s *)tcp;
+	return 0;
+#else
 	switch (uv_guess_handle(fd)) {
 		case UV_TCP:
 			tcp = raft_malloc(sizeof *tcp);
@@ -113,6 +156,7 @@ int transport__stream(struct uv_loop_s *loop,
 	};
 
 	return 0;
+#endif /* _WIN32 */
 }
 
 int transport__init(struct transport *t, struct uv_stream_s *stream)

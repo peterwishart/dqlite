@@ -78,7 +78,7 @@ static void heapAlignedFree(void *data, size_t alignment, void *ptr)
 {
     struct heap *h = data;
     munit_assert_ulong(alignment, ==, h->alignment);
-    heapFree(data, ptr);
+    RAFT_ALIGNED_FREE(ptr);
 }
 
 static int getIntParam(const MunitParameter params[], const char *name)

@@ -2,12 +2,22 @@
 
 #include <uv.h>
 
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif
 #include <netdb.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 
-#ifdef DQLITE_STATIC_LIBC
+/* On Windows the getaddrinfo/freeaddrinfo fault-injection interposer below
+ * cannot be built: it relies on dlsym(RTLD_NEXT, ...) ELF symbol interposition,
+ * and defining getaddrinfo/freeaddrinfo would clash with ws2_32's exports. So,
+ * exactly as for the DQLITE_STATIC_LIBC case, the AddrinfoInject* API degrades
+ * to a no-op on Windows: the mock is never enabled, real ws2_32 resolution is
+ * used, and the setUp/tearDown bookkeeping assertions (addrinfo_mock_enabled /
+ * addrinfo_data) are not tripped. Tests that depend on *injected* resolution
+ * results simply won't intercept on Windows. */
+#if defined(DQLITE_STATIC_LIBC) || defined(_WIN32)
 
 void AddrinfoInjectSetResponse(int rv,
                                int num_results,
@@ -93,6 +103,16 @@ void AddrinfoInjectSetResponse(int rv,
     response->next = addrinfo_data;
     addrinfo_data = response;
 }
+
+/* The getaddrinfo/freeaddrinfo fault-injection interposer relies on
+ * dlsym(RTLD_NEXT, ...) to reach the real resolver, a Linux/ELF symbol
+ * interposition trick. On Windows there is no RTLD_NEXT, and *defining*
+ * getaddrinfo/freeaddrinfo here would collide with ws2_32's exports (duplicate
+ * symbol at link time). So the interposer is compiled on POSIX only; on Windows
+ * the real ws2_32 getaddrinfo/freeaddrinfo are used directly (no injection).
+ * The AddrinfoInject* setup/response API above still compiles so callers link;
+ * tests that depend on injected resolution simply won't intercept on Windows. */
+#ifndef _WIN32
 
 static int invoke_system_getaddrinfo(const char *node,
                                      const char *service,
@@ -193,5 +213,7 @@ void freeaddrinfo(struct addrinfo *res)
     }
     free(response);
 }
+
+#endif /* ifndef _WIN32 (getaddrinfo/freeaddrinfo interposer) */
 
 #endif /* ifdef DQLITE_STATIC_LIBC ... else */

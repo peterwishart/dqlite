@@ -176,9 +176,9 @@ void progressMarkRecentRecv(struct raft *r, const unsigned i)
 	r->leader_state.progress[i].recent_recv = true;
 }
 
-inline void progressSetFeatures(struct raft *r,
-				const unsigned i,
-				raft_flags features)
+void progressSetFeatures(struct raft *r,
+			 const unsigned i,
+			 raft_flags features)
 {
 	r->leader_state.progress[i].features = features;
 }

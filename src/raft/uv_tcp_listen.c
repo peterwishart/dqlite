@@ -86,6 +86,16 @@ static void uvTcpIncomingAbort(struct uvTcpIncoming *incoming)
 	 * read_cb will be called. */
 	queue_remove(&incoming->queue);
 	queue_insert_tail(&t->aborting, &incoming->queue);
+#ifdef _WIN32
+	/* On Windows, uv_close() on a TCP handle that still has an active
+	 * uv_read_start does not run its close callback until the pending read
+	 * completes (which, mid-handshake, only happens once the peer sends more
+	 * data or closes) -- so an abort during/after a partial or bad handshake
+	 * would hang the transport close forever. Explicitly stopping the read
+	 * first cancels the pending WSARecv so the close callback fires promptly.
+	 * uv_read_stop() is a no-op if no read is active. */
+	uv_read_stop((uv_stream_t *)incoming->tcp);
+#endif
 	uv_close((struct uv_handle_s *)incoming->tcp, uvTcpIncomingCloseCb);
 }
 

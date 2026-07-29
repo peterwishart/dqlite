@@ -1,0 +1,10 @@
+{
+  "name": "dqlite",
+  "version-string": "1.18.7",
+  "builtin-baseline": "6d9d7df564a1ccdaa994e4ad39ccd4a32360867b",
+  "dependencies": [
+    "libuv",
+    "sqlite3",
+    "lz4"
+  ]
+}

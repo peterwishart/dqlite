@@ -3,8 +3,19 @@
 #ifndef UV_OS_H_
 #define UV_OS_H_
 
+/* Capability macro: kernel AIO (io_setup/io_submit/io_getevents) and eventfd
+ * are Linux-only. Define DQLITE_HAVE_KAIO when they are available so the
+ * kernel-AIO fast path can be compiled out on macOS/Windows. Defining
+ * DQLITE_DISABLE_KAIO forces the portable path even on Linux, which lets the
+ * exact non-Linux code path be built and tested on Linux. */
+#if defined(__linux__) && !defined(DQLITE_DISABLE_KAIO)
+#define DQLITE_HAVE_KAIO 1
+#endif
+
 #include <fcntl.h>
+#if defined(DQLITE_HAVE_KAIO)
 #include <linux/aio_abi.h>
+#endif
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <uv.h>
@@ -74,6 +85,7 @@ int UvOsRename(const char *path1, const char *path2);
 int UvOsJoin(const char *dir, const char *filename, char *path);
 
 /* TODO: figure a portable abstraction. */
+#if defined(DQLITE_HAVE_KAIO)
 int UvOsIoSetup(unsigned nr, aio_context_t *ctxp);
 int UvOsIoDestroy(aio_context_t ctx);
 int UvOsIoSubmit(aio_context_t ctx, long nr, struct iocb **iocbpp);
@@ -83,6 +95,7 @@ int UvOsIoGetevents(aio_context_t ctx,
 		    struct io_event *events,
 		    struct timespec *timeout);
 int UvOsEventfd(unsigned int initval, int flags);
+#endif /* DQLITE_HAVE_KAIO */
 int UvOsSetDirectIo(uv_file fd);
 
 /* Format an error message caused by a failed system call or stdlib function. */

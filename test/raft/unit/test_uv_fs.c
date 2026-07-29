@@ -66,6 +66,10 @@ TEST(UvFsCheckDir, doesNotExist, DirSetUp, DirTearDown, 0, NULL)
 /* If the process can't access the directory, an error is returned. */
 TEST(UvFsCheckDir, permissionDenied, NULL, NULL, 0, NULL)
 {
+#ifdef _WIN32
+    /* Relies on the Linux-only virtual path /proc/1/root. */
+    return MUNIT_SKIP;
+#else
     bool has_access = DirHasFile("/proc/1", "root");
     /* Skip the test is the process actually has access to /proc/1/root. */
     if (has_access) {
@@ -74,22 +78,33 @@ TEST(UvFsCheckDir, permissionDenied, NULL, NULL, 0, NULL)
     CHECK_DIR_ERROR("/proc/1/root", RAFT_UNAUTHORIZED,
                     "can't access directory '/proc/1/root'");
     return MUNIT_OK;
+#endif
 }
 
 /* If the given path contains a non-directory prefix, an error is returned. */
 TEST(UvFsCheckDir, notDirPrefix, NULL, NULL, 0, NULL)
 {
+#ifdef _WIN32
+    /* Relies on the Linux-only device path /dev/null. */
+    return MUNIT_SKIP;
+#else
     CHECK_DIR_ERROR("/dev/null/foo", RAFT_INVALID,
                     "path '/dev/null/foo' is not a directory");
     return MUNIT_OK;
+#endif
 }
 
 /* If the given path is not a directory, an error is returned. */
 TEST(UvFsCheckDir, notDir, NULL, NULL, 0, NULL)
 {
+#ifdef _WIN32
+    /* Relies on the Linux-only device path /dev/null. */
+    return MUNIT_SKIP;
+#else
     CHECK_DIR_ERROR("/dev/null", RAFT_INVALID,
                     "path '/dev/null' is not a directory");
     return MUNIT_OK;
+#endif
 }
 
 /* If the given directory is not writable, an error is returned. */
@@ -388,6 +403,7 @@ TEST(UvFsProbeCapabilities, noSpace, DirTmpfsSetUp, DirTearDown, 0, NULL)
     return MUNIT_OK;
 }
 
+#if defined(DQLITE_HAVE_KAIO)
 /* The uvIoSetup() call fails with EAGAIN. */
 TEST(UvFsProbeCapabilities, noResources, DirBtrfsSetUp, DirTearDown, 0, NULL)
 {
@@ -407,6 +423,7 @@ TEST(UvFsProbeCapabilities, noResources, DirBtrfsSetUp, DirTearDown, 0, NULL)
     AioDestroy(ctx);
     return MUNIT_OK;
 }
+#endif /* DQLITE_HAVE_KAIO */
 
 /******************************************************************************
  *

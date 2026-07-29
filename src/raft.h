@@ -1385,6 +1385,15 @@ DQLITE_VISIBLE_TO_TESTS void *raft_realloc(void *ptr, size_t size);
 DQLITE_VISIBLE_TO_TESTS void *raft_aligned_alloc(size_t alignment, size_t size);
 DQLITE_VISIBLE_TO_TESTS void raft_aligned_free(size_t alignment, void *ptr);
 
+/*
+ * Release a block obtained from an aligned allocation (aligned_alloc() or the
+ * raft heap's aligned_alloc vtable entry). C11 guarantees aligned_alloc()
+ * memory is freeable with free(); on Windows aligned_alloc() maps to plain
+ * malloc() (see compat/win/dqlite_win_prelude.h), so free() is correct there
+ * too. This macro is retained as documentation of intent at aligned-free sites.
+ */
+#define RAFT_ALIGNED_FREE(PTR) free(PTR)
+
 /**
  * Use a custom dynamic memory allocator.
  */

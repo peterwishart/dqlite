@@ -2,6 +2,10 @@
 #ifndef TEST_AIO_H
 #define TEST_AIO_H
 
+#include "../../../src/raft/uv_os.h" /* for DQLITE_HAVE_KAIO */
+
+#if defined(DQLITE_HAVE_KAIO)
+
 #include <linux/aio_abi.h>
 
 /* Fill the AIO subsystem resources by allocating a lot of events to the given
@@ -15,5 +19,7 @@ int AioFill(aio_context_t *ctx, unsigned n);
 
 /* Destroy the given AIO context. */
 void AioDestroy(aio_context_t ctx);
+
+#endif /* DQLITE_HAVE_KAIO */
 
 #endif /* TEST_AIO_H */

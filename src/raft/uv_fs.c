@@ -1,12 +1,25 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+/* UNVERIFIED-NEEDS-MAC: macOS analog of _GNU_SOURCE. Exposes the BSD
+ * <sys/mount.h> statfs API and the F_NOCACHE fcntl. Guarded so Linux and
+ * Windows preprocessed output is unchanged. */
+#define _DARWIN_C_SOURCE
+#endif
 
 #include <fcntl.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__APPLE__)
+/* UNVERIFIED-NEEDS-MAC: macOS/BSD provide `struct statfs` + fstatfs() via
+ * <sys/mount.h> (with <sys/param.h>), not the Linux-only <sys/vfs.h>. */
+#include <sys/mount.h>
+#include <sys/param.h>
+#else
 #include <sys/vfs.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -76,6 +89,28 @@ int UvFsCheckDir(const char *dir, char *errmsg)
 
 int UvFsSyncDir(const char *dir, char *errmsg)
 {
+#ifdef _WIN32
+	/* On Windows, libuv's uv_fs_open() cannot obtain a directory handle: it
+	 * does not pass FILE_FLAG_BACKUP_SEMANTICS to CreateFile, so opening an
+	 * existing directory fails. NTFS also provides no directory fsync.
+	 * Open the directory explicitly with backup semantics, which (a) still
+	 * fails for a non-existent path -- preserving the POSIX error path and
+	 * the exact "open directory: no such file or directory" message used by
+	 * the tests -- and (b) lets us best-effort flush its metadata.
+	 * FlushFileBuffers on a directory handle is not supported by NTFS, so its
+	 * failure is intentionally ignored. */
+	HANDLE h = CreateFileA(dir, GENERIC_READ,
+			       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+			       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	if (h == INVALID_HANDLE_VALUE) {
+		int rv = uv_translate_sys_error((int)GetLastError());
+		UvOsErrMsg(errmsg, "open directory", rv);
+		return RAFT_IOERR;
+	}
+	(void)FlushFileBuffers(h);
+	CloseHandle(h);
+	return 0;
+#else
 	uv_file fd;
 	int rv;
 	rv = UvOsOpen(dir, UV_FS_O_RDONLY | UV_FS_O_DIRECTORY, 0, &fd);
@@ -90,6 +125,7 @@ int UvFsSyncDir(const char *dir, char *errmsg)
 		return RAFT_IOERR;
 	}
 	return 0;
+#endif
 }
 
 int UvFsFileExists(const char *dir,
@@ -408,7 +444,28 @@ static int uvFsWriteFile(const char *dir,
 	if (rv != 0) {
 		goto err;
 	}
+#ifdef _WIN32
+	/* struct raft_buffer is {void *base; size_t len;} but uv_buf_t on Windows
+	 * is {ULONG len; char *base;} -- a different field order -- so the
+	 * reinterpret cast used on POSIX would mis-decode base/len here. Build a
+	 * proper uv_buf_t array via uv_buf_init instead. */
+	{
+		uv_buf_t *uvbufs = raft_malloc(n_bufs * sizeof *uvbufs);
+		if (uvbufs == NULL) {
+			ErrMsgPrintf(errmsg, "out of memory");
+			rv = RAFT_NOMEM;
+			goto err_after_file_open;
+		}
+		for (i = 0; i < n_bufs; i++) {
+			uvbufs[i] =
+			    uv_buf_init(bufs[i].base, (unsigned)bufs[i].len);
+		}
+		rv = UvOsWrite(fd, uvbufs, n_bufs, 0);
+		raft_free(uvbufs);
+	}
+#else
 	rv = UvOsWrite(fd, (const uv_buf_t *)bufs, n_bufs, 0);
+#endif
 	if (rv != (int)(size)) {
 		if (rv < 0) {
 			UvOsErrMsg(errmsg, "write", rv);
@@ -504,7 +561,7 @@ err_after_tmp_create:
 }
 
 #ifdef LZ4_AVAILABLE
-static inline int uvOsWriteOne(uv_os_fd_t fd,
+static inline int uvOsWriteOne(uv_file fd,
 			       void *data,
 			       size_t length,
 			       int64_t offset,
@@ -714,7 +771,17 @@ open:
 		goto err;
 	}
 
+#ifdef _WIN32
+	/* raft_buffer {void *base; size_t len;} differs in layout from Windows
+	 * uv_buf_t {ULONG len; char *base;}; build one explicitly rather than
+	 * reinterpret-casting. */
+	{
+		uv_buf_t uvbuf = uv_buf_init(buf->base, (unsigned)buf->len);
+		rv = UvOsWrite(fd, &uvbuf, 1, 0);
+	}
+#else
 	rv = UvOsWrite(fd, (const uv_buf_t *)buf, 1, 0);
+#endif
 	if (rv != (int)(buf->len)) {
 		if (rv < 0) {
 			UvOsErrMsg(errmsg, "write", rv);
@@ -815,8 +882,15 @@ int UvFsReadFile(const char *dir,
 		goto err;
 	}
 
+#if defined(__APPLE__)
+	/* UNVERIFIED-NEEDS-MAC: macOS has no posix_fadvise(); the sequential-read
+	 * hint is a best-effort optimization only, so it is simply skipped. (The
+	 * fcntl F_RDADVISE equivalent is deliberately not used to keep this
+	 * minimal.) */
+#else
 	rv = posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
 	dqlite_assert(rv == 0);
+#endif
 
 	buf->len = (size_t)sb.st_size;
 	buf->base = RaftHeapMalloc(buf->len);
@@ -868,8 +942,12 @@ int UvFsReadCompressedFile(const char *dir,
 		return rv;
 	}
 
+#if defined(__APPLE__)
+	/* UNVERIFIED-NEEDS-MAC: no posix_fadvise() on macOS; skip the hint. */
+#else
 	rv = posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
 	dqlite_assert(rv == 0);
+#endif
 
 	LZ4F_decompressionContext_t ctx;
 	size_t lzrv = LZ4F_createDecompressionContext(&ctx, LZ4F_VERSION);
@@ -1117,9 +1195,59 @@ err:
 	return RAFT_IOERR;
 }
 
+/* Whether direct I/O has been forced off via the DQLITE_IO_NO_DIRECT
+ * environment variable. This makes the buffered-I/O + fsync write path (the
+ * only option on macOS/Windows) regression-testable on Linux, where direct
+ * I/O would otherwise be selected. See PORT_DESIGN.md. */
+static bool uvFsNoDirectIo(void)
+{
+	const char *env = getenv("DQLITE_IO_NO_DIRECT");
+	return env != NULL && env[0] != '\0';
+}
+
 /* Check if direct I/O is possible on the given fd. */
 static int probeDirectIO(int fd, size_t *size, char *errmsg)
 {
+#if defined(__APPLE__)
+	/* UNVERIFIED-NEEDS-MAC: macOS has no O_DIRECT, and the Linux probe below
+	 * relies on <sys/vfs.h> f_type magic numbers that do not exist on Darwin.
+	 * Report direct I/O as unavailable so UvFsProbeCapabilities sets
+	 * async = false and the caller selects the buffered write + fsync
+	 * (portable libuv-threadpool) backend -- the same outcome as the
+	 * no-kernel-AIO design proven on Linux via DQLITE_DISABLE_KAIO /
+	 * DQLITE_IO_NO_DIRECT. This intentionally does NOT error out the way the
+	 * Linux path would for a non-EINVAL UvOsSetDirectIo result. */
+	(void)fd;
+	(void)errmsg;
+	*size = 0;
+	return 0;
+#elif defined(_WIN32)
+	/* Windows has no O_DIRECT. The portable UvOsSetDirectIo() reports
+	 * UV_ENOTSUP and FILE_FLAG_NO_BUFFERING (the Win32 O_DIRECT equivalent)
+	 * is deliberately NOT used -- dqlite's Windows write path is buffered
+	 * writes + fsync on the libuv threadpool. Report direct I/O as
+	 * unavailable (block size 0) so UvFsProbeCapabilities sets async = false
+	 * and the caller selects the threadpool backend, mirroring the __APPLE__
+	 * path above.
+	 *
+	 * This explicit early-return is deliberate: without it the Linux probe
+	 * below would compile on Windows (via the <sys/vfs.h>/fstatfs compat
+	 * shims), but UvOsSetDirectIo() returns 0 there -- because O_DIRECT is
+	 * #defined to 0 in the forced prelude, fcntl(F_SETFL, flags | 0) is a
+	 * successful no-op -- so the probe would fall through to the buffered
+	 * write() and report *size = 4096, i.e. uv->direct_io = true. That is
+	 * semantically wrong for Windows (it never does aligned direct I/O) and
+	 * only avoided breakage by coincidence: the fstatfs() TMPFS_MAGIC shim is
+	 * never even reached, and the writer stays buffered solely because
+	 * async = false. Reporting no-direct here makes the intent explicit and
+	 * robust. GetVolumeInformation()-based filesystem-type detection is
+	 * therefore unnecessary: it would only matter for deciding direct-I/O
+	 * compatibility, which Windows never uses. */
+	(void)fd;
+	(void)errmsg;
+	*size = 0;
+	return 0;
+#else
 	struct statfs fs_info; /* To check the file system type. */
 	void *buf;             /* Buffer to use for the probe write. */
 	int rv;
@@ -1195,8 +1323,10 @@ static int probeDirectIO(int fd, size_t *size, char *errmsg)
 
 	*size = 0;
 	return 0;
+#endif /* __APPLE__ */
 }
 
+#if defined(DQLITE_HAVE_KAIO)
 /* Check if fully non-blocking async I/O is possible on the given fd. */
 static int probeAsyncIO(int fd, size_t size, bool *ok, char *errmsg)
 {
@@ -1280,6 +1410,7 @@ static int probeAsyncIO(int fd, size_t size, bool *ok, char *errmsg)
 
 	return 0;
 }
+#endif /* DQLITE_HAVE_KAIO */
 
 #define UV__FS_PROBE_FALLOCATE_FILE ".probe_fallocate"
 /* Leave detection of other error conditions to other probe* functions, only
@@ -1330,11 +1461,17 @@ int UvFsProbeCapabilities(const char *dir,
 	}
 	UvFsRemoveFile(dir, UV__FS_PROBE_FILE, ignored);
 
-	/* Check if we can use direct I/O. */
-	rv = probeDirectIO(fd, direct, errmsg);
-	if (rv != 0) {
-		ErrMsgWrapf(errmsg, "probe Direct I/O");
-		goto err_after_file_open;
+	/* Check if we can use direct I/O, unless it has been forced off via the
+	 * DQLITE_IO_NO_DIRECT switch (treat it as unavailable, so writes fall
+	 * back to buffered I/O + fsync, as on macOS/Windows). */
+	if (uvFsNoDirectIo()) {
+		*direct = 0;
+	} else {
+		rv = probeDirectIO(fd, direct, errmsg);
+		if (rv != 0) {
+			ErrMsgWrapf(errmsg, "probe Direct I/O");
+			goto err_after_file_open;
+		}
 	}
 
 	/* If direct I/O is not possible, we can't perform fully asynchronous
@@ -1343,11 +1480,17 @@ int UvFsProbeCapabilities(const char *dir,
 		*async = false;
 		goto out;
 	}
+#if defined(DQLITE_HAVE_KAIO)
 	rv = probeAsyncIO(fd, *direct, async, errmsg);
 	if (rv != 0) {
 		ErrMsgWrapf(errmsg, "probe Async I/O");
 		goto err_after_file_open;
 	}
+#else
+	/* Without kernel AIO, fully asynchronous I/O is never available; the
+	 * portable threadpool backend is used instead. */
+	*async = false;
+#endif /* DQLITE_HAVE_KAIO */
 
 out:
 	close(fd);

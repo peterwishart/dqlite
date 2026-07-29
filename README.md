@@ -126,6 +126,79 @@ replace the configure step with something like
 $ ./configure --prefix=/usr
 ```
 
+Building on Windows
+-------------------
+
+dqlite also builds on Windows (64-bit). The autotools build above is Linux-only;
+on Windows the **CMake** build (`CMakeLists.txt`) is used instead, together with
+a small POSIX compatibility layer under `compat/win/`. The toolchain is **Clang**
+(`clang-cl`) with **Ninja**, and dependencies are provided by **vcpkg**.
+
+### Prerequisites
+
+* **Visual Studio 2022** with the *C++ Clang tools for Windows* component
+  (`clang-cl` 19 or later) and the bundled **CMake** and **Ninja**.
+* **vcpkg** (the copy bundled with VS 2022, or a standalone checkout) to supply
+  the dependencies.
+
+### Dependencies (vcpkg)
+
+libuv, SQLite and LZ4 are declared in the repository's `vcpkg.json` manifest.
+You do **not** need to install them by hand — the CMake configure step below
+uses the vcpkg toolchain file, which installs the manifest's dependencies
+automatically (into `build-win\vcpkg_installed\x64-windows\`, git-ignored).
+
+### Configure and build
+
+1. Start the **"x64 Native Tools Command Prompt for VS 2022"**. This puts the
+   64-bit `clang-cl`, `cmake`, `ninja` and the Windows SDK on `PATH`. (Do **not**
+   use the plain *Developer PowerShell for VS 2022* — it defaults to a 32-bit
+   environment, which makes `find_package` reject the 64-bit vcpkg libraries.)
+2. Run `powershell` to get a PowerShell prompt inside that x64 environment.
+3. `cd` to the repository root.
+4. Configure and build:
+
+   ```
+   cmake -S . -B build-win -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_TOOLCHAIN_FILE="${env:vcpkg_root}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows
+   cmake --build build-win
+   ```
+
+The vcpkg toolchain file installs the `vcpkg.json` dependencies automatically
+(manifest mode — no separate `vcpkg install` needed) into
+`build-win\vcpkg_installed\x64-windows\` and wires them up for `find_package`, so
+you do **not** need to set `CMAKE_PREFIX_PATH` yourself. `${env:vcpkg_root}`
+refers to your vcpkg install; the copy bundled with VS 2022 lives under
+`...\VC\vcpkg` and sets this variable for you.
+
+If a configure step fails, clear the build directory and start fresh:
+
+```
+Remove-Item -Recurse -Force build-win
+```
+
+`CMAKE_TOOLCHAIN_FILE` is only honored on a build dir's *first* configure, so a
+stale `build-win\` can leave `find_package(libuv)` failing even after everything
+is set up correctly.
+
+This produces `dqlite.dll` and `dqlite_static.lib`, plus the test executables,
+in `build-win\`. Add `-- -k 0` to `cmake --build` to keep going past the first
+error (handy when working on portability, so all failures surface in one pass).
+
+### Running the tests
+
+The test executables link the vcpkg dependencies as DLLs, so those directories
+must be on `PATH` first (the `debug\bin` directory is needed for the default,
+unoptimized build). Continuing in the same PowerShell prompt from above:
+
+```
+$dll = "$PWD\build-win\vcpkg_installed\x64-windows"
+$env:PATH = "$dll\debug\bin;$dll\bin;$env:PATH"
+build-win\unit-test.exe
+build-win\integration-test.exe
+build-win\raft-uv-unit-test.exe
+build-win\raft-uv-integration-test.exe
+```
+
 Building for static linking
 ---------------------------
 

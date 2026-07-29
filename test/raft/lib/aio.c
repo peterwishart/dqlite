@@ -1,5 +1,7 @@
 #include "aio.h"
 
+#if defined(DQLITE_HAVE_KAIO)
+
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/syscall.h>
@@ -64,3 +66,5 @@ void AioDestroy(aio_context_t ctx)
     rv = syscall(__NR_io_destroy, ctx);
     munit_assert_int(rv, ==, 0);
 }
+
+#endif /* DQLITE_HAVE_KAIO */

@@ -1,3 +1,13 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+/* UNVERIFIED-NEEDS-MAC: macOS analog of _GNU_SOURCE. Exposes the BSD
+ * <sys/mount.h> statfs API and the F_NOCACHE fcntl. Guarded so Linux and
+ * Windows preprocessed output is unchanged. */
+#define _DARWIN_C_SOURCE
+#endif
+
 #include "uv_os.h"
 
 #include <errno.h>
@@ -6,9 +16,18 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#if defined(DQLITE_HAVE_KAIO)
 #include <sys/eventfd.h>
+#endif
 #include <sys/types.h>
+#if defined(__APPLE__)
+/* UNVERIFIED-NEEDS-MAC: macOS/BSD provide `struct statfs` (with f_bsize used by
+ * UvOsFallocateEmulation) + fstatfs() via <sys/mount.h>, not <sys/vfs.h>. */
+#include <sys/mount.h>
+#include <sys/param.h>
+#else
 #include <sys/vfs.h>
+#endif
 #include <unistd.h>
 #include <uv.h>
 
@@ -150,6 +169,7 @@ int UvOsJoin(const char *dir, const char *filename, char *path)
 	return 0;
 }
 
+#if defined(DQLITE_HAVE_KAIO)
 int UvOsIoSetup(unsigned nr, aio_context_t *ctxp)
 {
 	int rv;
@@ -212,13 +232,24 @@ int UvOsEventfd(unsigned int initval, int flags)
 	}
 	return rv;
 }
+#endif /* DQLITE_HAVE_KAIO */
 
 int UvOsSetDirectIo(uv_file fd)
 {
-	int flags; /* Current fcntl flags */
 	int rv;
-	flags = fcntl(fd, F_GETFL);
-	rv = fcntl(fd, F_SETFL, flags | UV_FS_O_DIRECT);
+#if defined(O_DIRECT)
+	/* Linux: request O_DIRECT via the file status flags. */
+	int flags = fcntl(fd, F_GETFL);
+	rv = fcntl(fd, F_SETFL, flags | O_DIRECT);
+#elif defined(__APPLE__)
+	/* macOS has no O_DIRECT; F_NOCACHE disables the buffer cache. */
+	rv = fcntl(fd, F_NOCACHE, 1);
+#else
+	/* No direct-I/O primitive on this platform (e.g. Windows uses
+	 * FILE_FLAG_NO_BUFFERING at open time instead). */
+	(void)fd;
+	return UV_ENOTSUP;
+#endif
 	if (rv == -1) {
 		return -errno;
 	}

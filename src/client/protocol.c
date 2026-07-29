@@ -13,6 +13,28 @@
 #include "../tracing.h"
 #include "../tuple.h"
 #include "protocol.h"
+#ifdef _WIN32
+#include <io.h>              /* _get_osfhandle */
+#include "dqlite_win_pipe.h" /* overlapped pipe read/write helpers */
+#endif
+
+#ifdef _WIN32
+/* The synchronous client talks to a dqlite node over whatever the node listens
+ * on. On Windows that is either a TCP loopback SOCKET ("host:port") or a Win32
+ * named pipe (the local "@name" transport). Socket descriptors need
+ * WSAPoll/send/recv/closesocket; named-pipe descriptors are CRT fds wrapping a
+ * (blocking) pipe HANDLE and use read/write/close -- WSAPoll cannot poll a
+ * pipe. Discriminate safely with getsockopt(SO_TYPE): it returns 0 for a real
+ * socket and fails with WSAENOTSOCK for a pipe fd cast to SOCKET (no CRT
+ * invalid-parameter abort, unlike _get_osfhandle on a socket value). */
+static bool clientFdIsSocket(int fd)
+{
+	int type;
+	int len = (int)sizeof type;
+	return getsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_TYPE,
+			  (char *)&type, &len) == 0;
+}
+#endif
 
 static void oom(void)
 {
@@ -129,6 +151,42 @@ static ssize_t doRead(int fd,
 	ssize_t n;
 	int rv;
 
+#ifdef _WIN32
+	if (!clientFdIsSocket(fd)) {
+		/* Named pipe (overlapped): WSAPoll cannot poll a pipe. Drive an
+		 * overlapped read with the caller's deadline as the timeout, so
+		 * callers such as the role-management poller (src/roles.c) do
+		 * NOT hang when a peer is slow/unreachable. */
+		HANDLE h = (HANDLE)_get_osfhandle(fd);
+		total = 0;
+		while ((size_t)total < buf_len) {
+			if (context != NULL) {
+				rv = clock_gettime(CLOCK_REALTIME, &now);
+				dqlite_assert(rv == 0);
+				millis = (context->deadline.tv_sec -
+					  now.tv_sec) * 1000 +
+					 (context->deadline.tv_nsec -
+					  now.tv_nsec) / 1000000;
+				if (millis < 0) {
+					break; /* timeout */
+				}
+			} else {
+				millis = -1; /* block indefinitely */
+			}
+			n = DqliteWinPipeReadTimed(h, (char *)buf + (size_t)total,
+						   buf_len - (size_t)total,
+						   millis);
+			if (n < 0) {
+				return -1;
+			} else if (n == 0) {
+				break; /* EOF or timeout */
+			}
+			total += n;
+		}
+		return total;
+	}
+#endif
+
 	pfd.fd = fd;
 	pfd.events = POLLIN;
 	pfd.revents = 0;
@@ -164,14 +222,32 @@ static ssize_t doRead(int fd,
 			break;
 		}
 		dqlite_assert(rv == 1);
+#ifdef _WIN32
+		/* WSAPoll signals a readable socket with POLLRDNORM, whereas
+		 * POLLIN on Windows is (POLLRDNORM | POLLRDBAND); an exact
+		 * `revents != POLLIN` test would therefore misread every normal
+		 * readiness as an error. Treat only the genuine error/invalid
+		 * bits as failures and otherwise fall through to recv() (which
+		 * reports EOF as 0). */
+		if (pfd.revents & (POLLERR | POLLNVAL)) {
+			return -1;
+		}
+#else
 		if (pfd.revents != POLLIN) {
 			/* If some other bits are set in the out parameter, an
 			 * error occurred. */
 			return -1;
 		}
+#endif
 
+#ifdef _WIN32
+		/* fd is a Winsock SOCKET; read() does not work on sockets. */
+		n = recv((SOCKET)(uintptr_t)fd, (char *)buf + (size_t)total,
+			 (int)(buf_len - (size_t)total), 0);
+#else
 		n = read(fd, (char *)buf + (size_t)total,
 			 buf_len - (size_t)total);
+#endif
 		if (n < 0) {
 			if (errno == EINTR) {
 				continue;
@@ -208,6 +284,15 @@ static ssize_t doWrite(int fd,
 	long long millis;
 	ssize_t n;
 	int rv;
+
+#ifdef _WIN32
+	if (!clientFdIsSocket(fd)) {
+		/* Named pipe (overlapped): write via the overlapped helper. */
+		n = DqliteWinPipeWriteAll((HANDLE)_get_osfhandle(fd), buf,
+					  buf_len);
+		return n;
+	}
+#endif
 
 	pfd.fd = fd;
 	pfd.events = POLLOUT;
@@ -250,8 +335,14 @@ static ssize_t doWrite(int fd,
 			return -1;
 		}
 
+#ifdef _WIN32
+		/* fd is a Winsock SOCKET; write() does not work on sockets. */
+		n = send((SOCKET)(uintptr_t)fd, (char *)buf + (size_t)total,
+			 (int)(buf_len - (size_t)total), 0);
+#else
 		n = write(fd, (char *)buf + (size_t)total,
 			  buf_len - (size_t)total);
+#endif
 		if (n < 0) {
 			if (errno == EINTR) {
 				continue;
@@ -333,7 +424,15 @@ void clientClose(struct client_proto *c)
 	if (c->fd == -1) {
 		return;
 	}
+#ifdef _WIN32
+	if (clientFdIsSocket(c->fd)) {
+		closesocket((SOCKET)(uintptr_t)c->fd);
+	} else {
+		close(c->fd);
+	}
+#else
 	close(c->fd);
+#endif
 	c->fd = -1;
 	buffer__close(&c->write);
 	buffer__close(&c->read);

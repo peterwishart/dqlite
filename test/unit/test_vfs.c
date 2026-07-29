@@ -1210,6 +1210,13 @@ TEST(VfsShmLock, exclBusy, setUp, tearDown, 0, NULL)
 TEST(VfsShmLock, releaseUnix, setUp, tearDown, 0, NULL)
 {
 	(void)data;
+#ifdef _WIN32
+	/* This case specifically exercises SQLite's native "unix" VFS, which
+	 * does not exist on Windows (the platform VFS is "win32"), so
+	 * sqlite3_vfs_find("unix") returns NULL. Skip it here. */
+	(void)params;
+	return MUNIT_SKIP;
+#else
 	struct sqlite3_vfs *vfs = sqlite3_vfs_find("unix");
 	sqlite3_file *file = munit_malloc(vfs->szOsFile);
 	int flags =
@@ -1257,6 +1264,7 @@ TEST(VfsShmLock, releaseUnix, setUp, tearDown, 0, NULL)
 	free(file);
 
 	return MUNIT_OK;
+#endif /* _WIN32 */
 }
 
 /* The dqlite VFS implementation allows to release a shared memory lock without
@@ -1595,7 +1603,22 @@ TEST(VfsIntegration, sqlite, setUp, tearDown, 0, NULL)
 
 	const int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_EXRESCODE;
 	
+#ifdef _WIN32
+	/* On Windows there is no /tmp; build the template under the real temp
+	 * dir so the mkstemp shim can create the file. */
+	char filename[MAX_PATH];
+	const char *tmpdir = getenv("TMP");
+	if (tmpdir == NULL) {
+		tmpdir = getenv("TEMP");
+	}
+	if (tmpdir == NULL) {
+		tmpdir = ".";
+	}
+	snprintf(filename, sizeof(filename),
+		 "%s\\dqlite-test-normal-sqlite-XXXXXX", tmpdir);
+#else
 	char filename[] = "/tmp/dqlite-test-normal-sqlite-XXXXXX";
+#endif
 	int fd = mkstemp(filename);
 	munit_assert_int(fd, >, 0);
 

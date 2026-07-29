@@ -84,7 +84,14 @@ TEST(membership, join, setUp, tearDown, 0, NULL)
 {
 	struct fixture *f = data;
 	unsigned id = 2;
+#ifdef _WIN32
+	/* The node binds a dynamic TCP loopback address on Windows (no
+	 * abstract-namespace AF_UNIX), so join it at its real address rather
+	 * than the Linux "@ID" literal. On Linux this field is exactly "@2". */
+	const char *address = f->servers[id - 1].address;
+#else
 	const char *address = "@2";
+#endif
 	uint32_t stmt_id;
 	uint64_t last_insert_id;
 	uint64_t rows_affected;
@@ -127,7 +134,14 @@ TEST(membership, transfer, setUp, tearDown, 0, NULL)
 {
 	struct fixture *f = data;
 	unsigned id = 2;
+#ifdef _WIN32
+	/* The node binds a dynamic TCP loopback address on Windows (no
+	 * abstract-namespace AF_UNIX), so join it at its real address rather
+	 * than the Linux "@ID" literal. On Linux this field is exactly "@2". */
+	const char *address = f->servers[id - 1].address;
+#else
 	const char *address = "@2";
+#endif
 	uint32_t stmt_id;
 	uint64_t last_insert_id;
 	uint64_t rows_affected;
@@ -176,7 +190,14 @@ TEST(membership,
 {
 	struct fixture *f = data;
 	unsigned id = 2;
+#ifdef _WIN32
+	/* The node binds a dynamic TCP loopback address on Windows (no
+	 * abstract-namespace AF_UNIX), so join it at its real address rather
+	 * than the Linux "@ID" literal. On Linux this field is exactly "@2". */
+	const char *address = f->servers[id - 1].address;
+#else
 	const char *address = "@2";
+#endif
 	uint32_t stmt_id;
 	uint64_t last_insert_id;
 	uint64_t rows_affected;
@@ -242,7 +263,14 @@ TEST(membership, transferAndSqlExecWithBarrier, setUp, tearDown, 0, NULL)
 	int rv;
 	struct fixture *f = data;
 	unsigned id = 2;
+#ifdef _WIN32
+	/* The node binds a dynamic TCP loopback address on Windows (no
+	 * abstract-namespace AF_UNIX), so join it at its real address rather
+	 * than the Linux "@ID" literal. On Linux this field is exactly "@2". */
+	const char *address = f->servers[id - 1].address;
+#else
 	const char *address = "@2";
+#endif
 	uint32_t stmt_id;
 	uint64_t errcode;
 	char *errmsg;
@@ -292,7 +320,14 @@ TEST(membership,
 {
 	struct fixture *f = data;
 	unsigned id = 2;
+#ifdef _WIN32
+	/* The node binds a dynamic TCP loopback address on Windows (no
+	 * abstract-namespace AF_UNIX), so join it at its real address rather
+	 * than the Linux "@ID" literal. On Linux this field is exactly "@2". */
+	const char *address = f->servers[id - 1].address;
+#else
 	const char *address = "@2";
+#endif
 	uint32_t stmt_id;
 	uint64_t last_insert_id;
 	uint64_t rows_affected;

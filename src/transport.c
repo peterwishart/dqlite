@@ -12,6 +12,10 @@
 #include "request.h"
 #include "tracing.h"
 #include "transport.h"
+#ifdef _WIN32
+#include <io.h>              /* _get_osfhandle */
+#include "dqlite_win_pipe.h" /* DqliteWinPipeWriteAll (overlapped pipe write) */
+#endif
 
 struct impl
 {
@@ -72,6 +76,14 @@ static void connect_work_cb(uv_work_t *work)
 	size_t n1;
 	size_t n2;
 	int rv;
+#ifdef _WIN32
+	/* On Windows the fd from the connect function is either a Winsock SOCKET
+	 * (TCP "host:port") or a CRT fd wrapping a named-pipe HANDLE (local
+	 * "@name"). Socket I/O uses send()/closesocket(); pipe I/O uses the CRT
+	 * write()/close() which operate on the _open_osfhandle'd descriptor. The
+	 * "@name" prefix distinguishes the two. */
+	bool is_pipe = (r->address != NULL && r->address[0] == '@');
+#endif
 
 	/* Establish a connection to the other node using the provided connect
 	 * function. */
@@ -84,7 +96,19 @@ static void connect_work_cb(uv_work_t *work)
 
 	/* Send the initial dqlite protocol handshake. */
 	protocol = ByteFlipLe64(DQLITE_PROTOCOL_VERSION);
+#ifdef _WIN32
+	if (is_pipe) {
+		/* Overlapped write: the pipe is opened FILE_FLAG_OVERLAPPED so
+		 * libuv can later drive it via IOCP (see dqlite_win_pipe.h). */
+		rv = DqliteWinPipeWriteAll((HANDLE)_get_osfhandle(r->fd),
+					   &protocol, sizeof protocol);
+	} else {
+		rv = send((SOCKET)(uintptr_t)r->fd, (const char *)&protocol,
+			  (int)sizeof protocol, 0);
+	}
+#else
 	rv = (int)write(r->fd, &protocol, sizeof protocol);
+#endif
 	if (rv != sizeof protocol) {
 		tracef("write failed");
 		rv = RAFT_NOCONNECTION;
@@ -115,7 +139,15 @@ static void connect_work_cb(uv_work_t *work)
 	message__encode(&message, &cursor);
 	request_connect__encode(&request, &cursor);
 
+#ifdef _WIN32
+	if (is_pipe) {
+		rv = DqliteWinPipeWriteAll((HANDLE)_get_osfhandle(r->fd), buf, n);
+	} else {
+		rv = send((SOCKET)(uintptr_t)r->fd, (const char *)buf, (int)n, 0);
+	}
+#else
 	rv = (int)write(r->fd, buf, n);
+#endif
 	sqlite3_free(buf);
 
 	if (rv != (int)n) {
@@ -128,7 +160,15 @@ static void connect_work_cb(uv_work_t *work)
 	return;
 
 err_after_connect:
+#ifdef _WIN32
+	if (is_pipe) {
+		close(r->fd);
+	} else {
+		closesocket((SOCKET)(uintptr_t)r->fd);
+	}
+#else
 	close(r->fd);
+#endif
 err:
 	r->status = rv;
 	return;
@@ -152,7 +192,15 @@ static void connect_after_work_cb(uv_work_t *work, int status)
 	if (rv != 0) {
 		tracef("transport stream failed %d", rv);
 		r->status = RAFT_NOCONNECTION;
+#ifdef _WIN32
+		if (r->address != NULL && r->address[0] == '@') {
+			close(r->fd);
+		} else {
+			closesocket((SOCKET)(uintptr_t)r->fd);
+		}
+#else
 		close(r->fd);
+#endif
 		goto out;
 	}
 out:
@@ -230,7 +278,11 @@ int transportDefaultConnect(void *arg, const char *address, int *fd)
 
 	rv = connect(*fd, addr, addr_len);
 	if (rv == -1) {
+#ifdef _WIN32
+		closesocket((SOCKET)(uintptr_t)*fd);
+#else
 		close(*fd);
+#endif
 		return RAFT_NOCONNECTION;
 	}
 

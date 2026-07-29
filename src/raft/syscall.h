@@ -3,6 +3,10 @@
 #ifndef SYSCALL_H_
 #define SYSCALL_H_
 
+#include "uv_os.h" /* for DQLITE_HAVE_KAIO */
+
+#if defined(DQLITE_HAVE_KAIO)
+
 #if HAVE_LINUX_AIO_ABI_H
 #include <linux/aio_abi.h>
 #include <signal.h>
@@ -43,5 +47,7 @@ int io_uring_enter(int fd,
 		   unsigned int flags,
 		   sigset_t *sig);
 #endif
+
+#endif /* DQLITE_HAVE_KAIO */
 
 #endif /* SYSCALL_ */

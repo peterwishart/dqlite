@@ -5,6 +5,17 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+/* Every fd handled in this file is a Winsock SOCKET (widened to int). On
+ * Windows read()/write()/close() do not operate on sockets, so route the two
+ * socket operations this harness performs -- close and write -- through
+ * closesocket()/send(). accept4() is already provided by the compat prelude
+ * (accept() + dropped flags). Scoped to this translation unit only. */
+#define close(fd) closesocket((SOCKET)(uintptr_t)(fd))
+#define write(fd, buf, n) \
+	send((SOCKET)(uintptr_t)(fd), (const char *)(buf), (int)(n), 0)
+#endif
+
 void TcpServerInit(struct TcpServer *s)
 {
     struct sockaddr_in addr;
@@ -31,7 +42,19 @@ void TcpServerInit(struct TcpServer *s)
     }
 
     /* Start listening. */
+#ifdef _WIN32
+    /* Windows enforces the listen backlog strictly and actively refuses
+     * (RST -> WSAECONNREFUSED) any connect once the accept queue is full,
+     * whereas Linux is lenient (rounds the backlog up and silently drops
+     * SYNs so the client just retransmits). Some tests (e.g.
+     * send/changeToUnconnectedAddress) open a connection that is never
+     * accept()ed and then expect a *further* connection to the same server
+     * to still succeed. A backlog of 1 makes the second connect fail on
+     * Windows only, so use a larger backlog here. */
+    rv = listen(s->socket, 16);
+#else
     rv = listen(s->socket, 1);
+#endif
     if (rv == -1) {
         munit_errorf("tcp server: listen(): %s", strerror(errno));
     }

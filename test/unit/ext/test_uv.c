@@ -8,6 +8,55 @@
 #include "../../lib/runner.h"
 #include "../../lib/uv.h"
 
+/* On Windows the client end (f->client) is one of two things depending on the
+ * endpoint family:
+ *
+ *  - tcp family: a Winsock SOCKET widened to int. read()/write()/close() do not
+ *    operate on sockets, so route through recv()/send()/closesocket().
+ *  - unix family: a CRT fd wrapping a Win32 named-pipe HANDLE (the local
+ *    transport is carried over a named pipe on Windows). Winsock recv()/send()
+ *    do not operate on a pipe fd, so route through the blocking CRT
+ *    _read()/_write()/_close().
+ *
+ * The two are told apart with uv_guess_handle() (UV_NAMED_PIPE for the pipe
+ * CRT fd; anything else -- a raw SOCKET -- is the tcp case), the same idiom
+ * transport__stream() uses. On POSIX these map to the plain read/write/close. */
+#ifdef _WIN32
+#include <io.h> /* _read, _write, _close */
+
+static int client_sock_recv(int fd, void *buf, size_t n)
+{
+	if (uv_guess_handle(fd) == UV_NAMED_PIPE) {
+		return _read(fd, buf, (unsigned)n);
+	}
+	return recv((SOCKET)(uintptr_t)fd, (char *)buf, (int)n, 0);
+}
+
+static int client_sock_send(int fd, const void *buf, size_t n)
+{
+	if (uv_guess_handle(fd) == UV_NAMED_PIPE) {
+		return _write(fd, buf, (unsigned)n);
+	}
+	return send((SOCKET)(uintptr_t)fd, (const char *)buf, (int)n, 0);
+}
+
+static int client_sock_close(int fd)
+{
+	if (uv_guess_handle(fd) == UV_NAMED_PIPE) {
+		return _close(fd);
+	}
+	return closesocket((SOCKET)(uintptr_t)fd);
+}
+
+#define CLIENT_SOCK_RECV(fd, buf, n) client_sock_recv((fd), (buf), (n))
+#define CLIENT_SOCK_SEND(fd, buf, n) client_sock_send((fd), (buf), (n))
+#define CLIENT_SOCK_CLOSE(fd) client_sock_close(fd)
+#else
+#define CLIENT_SOCK_RECV(fd, buf, n) read((fd), (buf), (n))
+#define CLIENT_SOCK_SEND(fd, buf, n) write((fd), (buf), (n))
+#define CLIENT_SOCK_CLOSE(fd) close(fd)
+#endif
+
 TEST_MODULE(ext_uv);
 
 /******************************************************************************
@@ -95,8 +144,20 @@ static void *setup(const MunitParameter params[], void *user_data)
 	test_uv_setup(params, &f->loop);
 	test_endpoint_setup(&f->endpoint, params);
 
-	rv = transport__stream(&f->loop, f->endpoint.fd, &f->listener);
-	munit_assert_int(rv, ==, 0);
+#ifdef _WIN32
+	if (f->endpoint.family == AF_UNIX) {
+		/* The "unix" family is a Win32 named pipe here: its listener
+		 * stream cannot be produced by wrapping a bound fd
+		 * (transport__stream + uv_listen); it must be created directly
+		 * with uv_pipe_bind on a fresh handle, which needs the loop. */
+		rv = test_endpoint_listen(&f->endpoint, &f->loop, &f->listener);
+		munit_assert_int(rv, ==, 0);
+	} else
+#endif
+	{
+		rv = transport__stream(&f->loop, f->endpoint.fd, &f->listener);
+		munit_assert_int(rv, ==, 0);
+	}
 
 	f->listener->data = f;
 
@@ -114,7 +175,7 @@ static void tear_down(void *data)
 {
 	struct fixture *f = data;
 	int rv;
-	rv = close(f->client);
+	rv = CLIENT_SOCK_CLOSE(f->client);
 	munit_assert_int(rv, ==, 0);
 	uv_close((struct uv_handle_s *)f->listener, (uv_close_cb)raft_free);
 	test_endpoint_tear_down(&f->endpoint);
@@ -149,7 +210,7 @@ TEST_CASE(write, sync, endpointParams)
 	rv = uv_write(&req, &f->stream, buf1, 1, NULL);
 	munit_assert_int(rv, ==, 0);
 
-	rv = read(f->client, buf2->base, buf2->len);
+	rv = CLIENT_SOCK_RECV(f->client, buf2->base, buf2->len);
 	munit_assert_int(rv, ==, buf2->len);
 
 	test_uv_run(&f->loop, 1);
@@ -218,7 +279,7 @@ TEST_CASE(read, sync, endpointParams)
 	rv = uv_read_start(&f->stream, test_read_sync__alloc_cb,
 			   test_read_sync__read_cb);
 
-	rv = write(f->client, buf->base, buf->len);
+	rv = CLIENT_SOCK_SEND(f->client, buf->base, buf->len);
 	munit_assert_int(rv, ==, buf->len);
 
 	test_uv_run(&f->loop, 1);

@@ -10,6 +10,9 @@
 #include <sys/statvfs.h>
 #include <sys/types.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <direct.h> /* _rmdir */
+#endif
 
 #define SEP "/"
 #define TEMPLATE "raft-test-XXXXXX"
@@ -44,6 +47,21 @@ MunitParameterEnum DirNoAioParams[] = {
     {NULL, NULL},
 };
 
+#ifdef _WIN32
+/* On Windows there is no /tmp; resolve a real temp-dir parent instead. */
+static const char *dirTempParent(void)
+{
+    const char *p = getenv("TMP");
+    if (p == NULL) {
+        p = getenv("TEMP");
+    }
+    if (p == NULL) {
+        p = ".";
+    }
+    return p;
+}
+#endif
+
 /* Create a temporary directory in the given parent directory. */
 static char *dirMakeTemp(const char *parent)
 {
@@ -64,7 +82,11 @@ void *DirSetUp(MUNIT_UNUSED const MunitParameter params[],
 {
     const char *fs = munit_parameters_get(params, DIR_FS_PARAM);
     if (fs == NULL) {
+#ifdef _WIN32
+        return dirMakeTemp(dirTempParent());
+#else
         return dirMakeTemp("/tmp");
+#endif
     } else if (strcmp(fs, "tmpfs") == 0) {
         return DirTmpfsSetUp(params, user_data);
     } else if (strcmp(fs, "ext4") == 0) {
@@ -116,7 +138,24 @@ static int dirRemoveFn(const char *path,
                        MUNIT_UNUSED int type,
                        MUNIT_UNUSED struct FTW *ftwb)
 {
+#ifdef _WIN32
+    /* On Windows the CRT remove() only unlinks files -- it cannot delete a
+     * directory (that needs _rmdir), and it refuses read-only entries. Clear
+     * any read-only attribute first, then dispatch on the entry type reported
+     * by the nftw walk (FTW_DP/FTW_D for directories, since the callers pass
+     * FTW_DEPTH so children are removed before their parent). */
+    DWORD attrs = GetFileAttributesA(path);
+    if (attrs != INVALID_FILE_ATTRIBUTES &&
+        (attrs & FILE_ATTRIBUTE_READONLY)) {
+        SetFileAttributesA(path, attrs & ~(DWORD)FILE_ATTRIBUTE_READONLY);
+    }
+    if (type == FTW_DP || type == FTW_D) {
+        return _rmdir(path);
+    }
     return remove(path);
+#else
+    return remove(path);
+#endif
 }
 
 static void dirRemove(char *dir)

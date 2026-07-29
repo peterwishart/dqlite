@@ -163,7 +163,22 @@ static int compareNodesForPromotion(const void *l, const void *r, void *p)
 	/* We prefer to promote a standby rather than a spare. If
 	 * left->role > right->role, then right is more "senior" than left,
 	 * so we want right to come first, so return 1.*/
-	return (left->role > right->role) - (left->role < right->role);
+	result = (left->role > right->role) - (left->role < right->role);
+	if (result != 0) {
+		return result;
+	}
+
+	/* Final tie-break on node id, to make the ordering a total order that
+	 * is deterministic across platforms. Without this, fully-equivalent
+	 * candidates (same failure-domain count, weight and role) compare equal,
+	 * and the resulting choice depends on the sort implementation's handling
+	 * of "equal" elements: glibc's qsort_r is a stable merge sort (preserves
+	 * input order), but MSVC's qsort_s is not stable and orders equal
+	 * elements differently, so the same input picked a different node on
+	 * Windows. Ordering ties by ascending id reproduces the input order that
+	 * the callers build (ascending id), i.e. the exact order glibc's stable
+	 * sort would keep, so Linux results are unchanged. */
+	return (left->id > right->id) - (left->id < right->id);
 }
 
 static int compareNodesForDemotion(const void *l, const void *r, void *p)

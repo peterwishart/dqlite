@@ -18,8 +18,15 @@
 
 struct test_server
 {
-	unsigned id;         /* Server ID. */
-	char address[8];     /* Server address. */
+	unsigned id; /* Server ID. */
+#ifdef _WIN32
+	/* On Windows the server uses a TCP loopback address ("127.0.0.1:PORT")
+	 * instead of the Linux abstract-namespace AF_UNIX address ("@ID"), which
+	 * cannot bind on Windows; that needs a larger buffer. */
+	char address[24];
+#else
+	char address[8]; /* Server address. */
+#endif
 	char *dir;           /* Data directory. */
 	dqlite_node *dqlite; /* Dqlite instance. */
 	bool role_management;

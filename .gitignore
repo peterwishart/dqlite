@@ -35,3 +35,9 @@ raft-uv-unit-test
 compile_commands.json
 contrib/build/
 contrib/prefix/
+
+# CMake / vcpkg (macOS/Windows port)
+vcpkg_installed/
+vcpkg_installed_static/
+build-win/
+build-asan-win/

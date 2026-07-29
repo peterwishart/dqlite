@@ -55,4 +55,25 @@ void test_endpoint_pair(struct test_endpoint *e, int *server, int *client);
 /* Return the endpoint address. */
 const char *test_endpoint_address(struct test_endpoint *e);
 
+#ifdef _WIN32
+/* Create the listener stream for the endpoint directly on the given libuv loop.
+ *
+ * The abstract-namespace AF_UNIX ("unix") family is carried over a Win32 named
+ * pipe on Windows (see compat/win/dqlite_win_pipe.h). A pipe listener cannot be
+ * produced by binding a raw fd and wrapping it via transport__stream() +
+ * uv_listen() (the POSIX model); it must be created with a native
+ * uv_pipe_init() + uv_pipe_bind() on a fresh uv_pipe_t, which needs the loop.
+ * This helper mirrors src/server.c dqliteNodeBindPipe and yields a listener
+ * stream ready for uv_listen(). The stream is allocated with raft_malloc(), so
+ * the caller frees it with raft_free() (matching transport__stream()).
+ *
+ * Only meaningful for the AF_UNIX family; the AF_INET (tcp) family continues to
+ * use transport__stream() on the bound socket fd. Returns 0 on success. */
+struct uv_loop_s;
+struct uv_stream_s;
+int test_endpoint_listen(struct test_endpoint *e,
+			 struct uv_loop_s *loop,
+			 struct uv_stream_s **listener);
+#endif
+
 #endif /* TEST_ENDPOINT_H */

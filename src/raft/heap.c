@@ -36,8 +36,9 @@ static void *defaultAlignedAlloc(void *data, size_t alignment, size_t size)
 
 static void defaultAlignedFree(void *data, size_t alignment, void *ptr)
 {
+	(void)data;
 	(void)alignment;
-	defaultFree(data, ptr);
+	RAFT_ALIGNED_FREE(ptr);
 }
 
 static struct raft_heap defaultHeap = {

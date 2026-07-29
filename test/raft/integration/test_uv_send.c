@@ -4,6 +4,21 @@
 #include "../lib/tcp.h"
 #include "../lib/uv.h"
 
+/* Close a raw peer SOCKET accepted by the TCP test server (see the reconnect
+ * tests below). On Windows the POSIX close() name resolves to the CRT _close(),
+ * which operates on CRT file descriptors and does NOT close sockets -- so a bare
+ * close() would never actually tear the peer down, no RST would be sent, and the
+ * write-error path under test would not be exercised. Route to closesocket()
+ * there, exactly as test/raft/lib/tcp.c does for the same reason. */
+static void closePeerSocket(int socket)
+{
+#ifdef _WIN32
+    closesocket((SOCKET)(uintptr_t)socket);
+#else
+    close(socket);
+#endif
+}
+
 /******************************************************************************
  *
  * Fixture with a libuv-based raft_io instance and some pre-set messages.
@@ -320,7 +335,7 @@ TEST(send, reconnectAfterWriteError, setUp, tearDown, 0, NULL)
     int socket;
     SEND(0);
     socket = TcpServerAccept(&f->server);
-    close(socket);
+    closePeerSocket(socket);
     SEND_FAILURE(0, RAFT_IOERR, "");
     SEND(0);
     return MUNIT_OK;
@@ -333,10 +348,14 @@ TEST(send, reconnectAfterMultipleWriteErrors, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     int socket;
+#ifndef _WIN32
+    /* Ignore SIGPIPE, which a write to a reset socket may raise on POSIX.
+     * Windows has no SIGPIPE. */
     signal(SIGPIPE, SIG_IGN);
+#endif
     SEND(0);
     socket = TcpServerAccept(&f->server);
-    close(socket);
+    closePeerSocket(socket);
     SEND_SUBMIT(1 /* message */, 0 /* rv */, RAFT_IOERR /* status */);
     SEND_SUBMIT(2 /* message */, 0 /* rv */, RAFT_IOERR /* status */);
     SEND_WAIT(1);

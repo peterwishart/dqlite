@@ -1,9 +1,26 @@
+#include <string.h>
+
 #include "../../../src/raft/uv_fs.h"
 #include "../../../src/raft/uv_writer.h"
 #include "../lib/aio.h"
 #include "../lib/dir.h"
 #include "../lib/loop.h"
 #include "../../lib/runner.h"
+
+#if defined(DQLITE_HAVE_KAIO)
+/* True when the portable libuv-threadpool write backend is in effect, in which
+ * case kernel-AIO-specific test cases do not apply. The portable backend is
+ * selected either when explicitly forced via DQLITE_IO_BACKEND=threadpool, or
+ * when async kernel I/O is unavailable, which DQLITE_IO_NO_DIRECT forces on
+ * Linux (async=false => auto-selected portable backend). */
+static bool uvThreadpoolBackend(void)
+{
+    const char *backend = getenv("DQLITE_IO_BACKEND");
+    const char *no_direct = getenv("DQLITE_IO_NO_DIRECT");
+    return (backend != NULL && strcmp(backend, "threadpool") == 0) ||
+           (no_direct != NULL && no_direct[0] != '\0');
+}
+#endif /* DQLITE_HAVE_KAIO */
 
 /******************************************************************************
  *
@@ -95,13 +112,13 @@ static void submitCbAssertResult(struct UvWriterReq *req, int status)
         }                                                              \
     }
 
-#define DESTROY_BUFS(BUFS, N_BUFS)           \
-    {                                        \
-        int __i;                             \
-        for (__i = 0; __i < N_BUFS; __i++) { \
-            free(BUFS[__i].base);            \
-        }                                    \
-        free(BUFS);                          \
+#define DESTROY_BUFS(BUFS, N_BUFS)             \
+    {                                          \
+        int __i;                               \
+        for (__i = 0; __i < N_BUFS; __i++) {   \
+            RAFT_ALIGNED_FREE(BUFS[__i].base); \
+        }                                      \
+        free(BUFS);                            \
     }
 
 #define WRITE_REQ(N_BUFS, CONTENT, OFFSET, RV, STATUS)             \
@@ -245,12 +262,18 @@ static void tearDown(void *data)
 
 SUITE(UvWriterInit)
 
+#if defined(DQLITE_HAVE_KAIO)
 /* The kernel has ran out of available AIO events. */
 TEST(UvWriterInit, noResources, setUpDeps, tearDownDeps, 0, NULL)
 {
     struct fixture *f = data;
     aio_context_t ctx = 0;
     int rv;
+    /* The portable backend does not use kernel AIO, so it cannot run out of
+     * AIO events; this failure mode is specific to the AIO backend. */
+    if (uvThreadpoolBackend()) {
+        return MUNIT_SKIP;
+    }
     rv = AioFill(&ctx, 0);
     if (rv != 0) {
         return MUNIT_SKIP;
@@ -259,6 +282,7 @@ TEST(UvWriterInit, noResources, setUpDeps, tearDownDeps, 0, NULL)
     AioDestroy(ctx);
     return MUNIT_OK;
 }
+#endif /* DQLITE_HAVE_KAIO */
 
 /******************************************************************************
  *
@@ -346,6 +370,7 @@ TEST(UvWriterSubmit, concurrentSame, NULL, NULL, 0, DirAllParams)
     return MUNIT_SKIP; /* TODO: tests stop responding */
 }
 
+#if defined(DQLITE_HAVE_KAIO)
 /* There are not enough resources to create an AIO context to perform the
  * write. */
 TEST(UvWriterSubmit, noResources, setUpDeps, tearDown, 0, DirNoAioParams)
@@ -363,6 +388,7 @@ TEST(UvWriterSubmit, noResources, setUpDeps, tearDown, 0, DirNoAioParams)
     AioDestroy(ctx);
     return MUNIT_OK;
 }
+#endif /* DQLITE_HAVE_KAIO */
 
 /******************************************************************************
  *

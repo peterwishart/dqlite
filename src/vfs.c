@@ -1,6 +1,13 @@
 #ifndef _GNU_SOURCE
 # define _GNU_SOURCE
 #endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+/* UNVERIFIED-NEEDS-MAC: macOS analog of _GNU_SOURCE. Exposes the BSD
+ * <sys/mman.h> (MAP_ANON) and <sys/random.h> feature set that _GNU_SOURCE
+ * turns on for glibc. Guarded so Linux and Windows preprocessed output is
+ * unchanged. */
+# define _DARWIN_C_SOURCE
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -758,7 +765,7 @@ static struct vfs *vfsCreate(const struct vfsConfig *config)
 
 	*v = (struct vfs) {
 		.config = config,
-		.base_vfs = sqlite3_vfs_find("unix"),
+		.base_vfs = sqlite3_vfs_find(NULL),
 	};
 	dqlite_assert(v->base_vfs != NULL);
 	return v;
@@ -1879,6 +1886,91 @@ static void vfsFinalizeTransaction(struct vfsMainFile *f)
 	w->tx = NULL;
 }
 
+/* Whether to use the portable "no mremap" fallback when replacing a shm
+ * mapping in place. macOS and Windows have no mremap, so there the fallback
+ * (mmap with MAP_FIXED) is the only option; on Linux the DQLITE_VFS_NO_MREMAP
+ * environment variable forces it so it can be regression-tested. The value is
+ * read only once. See PORT_DESIGN.md. */
+static bool vfsNoMremap(void)
+{
+#ifdef MREMAP_MAYMOVE
+	static atomic_int cached = -1;
+	int v = atomic_load_explicit(&cached, memory_order_relaxed);
+	if (v < 0) {
+		const char *env = getenv("DQLITE_VFS_NO_MREMAP");
+		v = (env != NULL && env[0] != '\0');
+		atomic_store_explicit(&cached, v, memory_order_relaxed);
+	}
+	return v != 0;
+#else
+	return true;
+#endif
+}
+
+/* Create a fresh mapping of the shm file at the given offset and install it at
+ * the fixed address dest, replacing whatever mapping is currently there. On
+ * Linux this creates the mapping anywhere and moves it onto dest with mremap;
+ * the portable fallback maps directly at dest with MAP_FIXED, which has the
+ * same effect without mremap (see vfsNoMremap). */
+static int vfsShmRemap(void *dest,
+		       size_t map_size,
+		       int fd,
+		       off_t offset,
+		       bool shared)
+{
+	const int flags = shared ? MAP_SHARED : MAP_PRIVATE;
+	if (vfsNoMremap()) {
+		void *region = mmap(dest, map_size, PROT_READ | PROT_WRITE,
+				    flags | MAP_FIXED, fd, offset);
+		if (region == MAP_FAILED) {
+			/* This should never happen. Also, this means that we
+			 * might leave the connection in a weird state. */
+			return SQLITE_NOMEM;
+		}
+		dqlite_assert(region == dest);
+		return SQLITE_OK;
+	}
+#ifdef MREMAP_MAYMOVE
+	void *region =
+	    mmap(NULL, map_size, PROT_READ | PROT_WRITE, flags, fd, offset);
+	if (region == MAP_FAILED) {
+		/* This should never happen. Also, this means that we
+		 * might leave the connection in a weird state. */
+		return SQLITE_NOMEM;
+	}
+	void *remapped = mremap(region, map_size, map_size,
+				MREMAP_MAYMOVE | MREMAP_FIXED, dest);
+	dqlite_assert(remapped == dest);
+#endif
+	return SQLITE_OK;
+}
+
+/* Install the already-populated scratch MAP_SHARED mapping (a mapping of the
+ * shm file at the given offset) at the fixed address dest, replacing the
+ * private mapping currently there, and release the scratch mapping. Used by
+ * vfsPublishShm, where the scratch mapping must stay live while the private
+ * contents are merged into it before being published. See vfsNoMremap. */
+static void vfsShmPublishRegion(void *scratch,
+				void *dest,
+				size_t map_size,
+				int fd,
+				off_t offset)
+{
+	if (vfsNoMremap()) {
+		void *region = mmap(dest, map_size, PROT_READ | PROT_WRITE,
+				    MAP_SHARED | MAP_FIXED, fd, offset);
+		dqlite_assert(region == dest);
+		int rv = munmap(scratch, map_size);
+		dqlite_assert(rv == 0);
+		return;
+	}
+#ifdef MREMAP_MAYMOVE
+	void *remapped = mremap(scratch, map_size, map_size,
+				MREMAP_MAYMOVE | MREMAP_FIXED, dest);
+	dqlite_assert(remapped == dest);
+#endif
+}
+
 /* vfsRedirectShm will turn the shared memory held by the SQLite connection
  * using this file into a private mapping, so that changes to this region will
  * not be seen by other connections open on the same file.
@@ -1899,18 +1991,12 @@ static int vfsRedirectShm(struct vfsMainFile *f)
 	for (int regionIndex = 0; regionIndex < f->mappedShmRegions.len;
 	     regionIndex += region_per_map) {
 		void *region = f->mappedShmRegions.ptr[regionIndex];
-		void *new_region =
-		    mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_PRIVATE,
-			 f->database->shm.fd,
-			 regionIndex * VFS__WAL_INDEX_REGION_SIZE);
-		if (new_region == MAP_FAILED) {
-			/* This should never happen. Also, this means that we
-			 * might leave the connection in a weird state. */
-			return SQLITE_NOMEM;
+		int rv = vfsShmRemap(
+		    region, map_size, f->database->shm.fd,
+		    regionIndex * VFS__WAL_INDEX_REGION_SIZE, false);
+		if (rv != SQLITE_OK) {
+			return rv;
 		}
-		void *remapped = mremap(new_region, map_size, map_size,
-					MREMAP_MAYMOVE | MREMAP_FIXED, region);
-		dqlite_assert(remapped == region);
 	}
 	return SQLITE_OK;
 }
@@ -1950,10 +2036,9 @@ static int vfsPublishShm(struct vfsMainFile *f)
 		    f->database->shm.fd, i * VFS__WAL_INDEX_REGION_SIZE);
 		dqlite_assert(region != MAP_FAILED);
 		memcpy(region, f->mappedShmRegions.ptr[i], map_size);
-		void *remapped = mremap(
-		    region, map_size, map_size,
-		    MREMAP_MAYMOVE | MREMAP_FIXED, f->mappedShmRegions.ptr[i]);
-		dqlite_assert(remapped == f->mappedShmRegions.ptr[i]);
+		vfsShmPublishRegion(region, f->mappedShmRegions.ptr[i],
+				    map_size, f->database->shm.fd,
+				    i * VFS__WAL_INDEX_REGION_SIZE);
 	}
 
 	const size_t ckptInfoSize = 40;
@@ -2012,10 +2097,8 @@ static int vfsPublishShm(struct vfsMainFile *f)
 		*sharedBackfillAttempted = *privateBackfillAttempted;
 	}
 
-	void *remapped =
-	    mremap(first_region_shared, map_size, map_size,
-		   MREMAP_MAYMOVE | MREMAP_FIXED, f->mappedShmRegions.ptr[0]);
-	dqlite_assert(remapped == f->mappedShmRegions.ptr[0]);
+	vfsShmPublishRegion(first_region_shared, f->mappedShmRegions.ptr[0],
+			    map_size, f->database->shm.fd, 0);
 
 	return SQLITE_OK;
 }
@@ -2030,20 +2113,14 @@ static int vfsRollbackShm(struct vfsMainFile *f) {
 	PRE((f->mappedShmRegions.len % region_per_map) == 0);
 
 	for (int i = 0; i < f->mappedShmRegions.len; i += region_per_map) {
-		void *new_region =
-		    mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED,
-			 f->database->shm.fd, i * VFS__WAL_INDEX_REGION_SIZE);
-		if (new_region == MAP_FAILED) {
-			/* This should never happen. Also, this means that we
-			 * might leave the connection in a weird state. */
-			return SQLITE_NOMEM;
-		}
-		/* Now the private map can be unmapped safely going back to the
+		/* Now the private map can be replaced safely going back to the
 		 * shared one. */
-		void *remapped = mremap(new_region, map_size, map_size,
-					MREMAP_MAYMOVE | MREMAP_FIXED,
-					f->mappedShmRegions.ptr[i]);
-		dqlite_assert(remapped == f->mappedShmRegions.ptr[i]);
+		int rv = vfsShmRemap(f->mappedShmRegions.ptr[i], map_size,
+				     f->database->shm.fd,
+				     i * VFS__WAL_INDEX_REGION_SIZE, true);
+		if (rv != SQLITE_OK) {
+			return rv;
+		}
 	}
 	return SQLITE_OK;
 }
@@ -2230,8 +2307,11 @@ static int vfsOpen(sqlite3_vfs *vfs,
 	if (filename == NULL) {
 		dqlite_assert(flags & SQLITE_OPEN_DELETEONCLOSE);
 
-		/* Open an actual temporary file. */
-		vfs = sqlite3_vfs_find("unix");
+		/* Open an actual temporary file, delegating to the base VFS
+		 * (the platform default: "unix" on Linux/macOS, "win32" on
+		 * Windows). Using sqlite3_vfs_find("unix") directly would
+		 * return NULL on Windows and trip the assert below. */
+		vfs = v->base_vfs;
 		dqlite_assert(vfs != NULL);
 		return vfs->xOpen(vfs, NULL, file, flags, out_flags);
 	} else if (flags & SQLITE_OPEN_MAIN_JOURNAL) {

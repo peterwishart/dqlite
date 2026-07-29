@@ -3,7 +3,93 @@
 #include "fs.h"
 #include "server.h"
 
+#ifdef _WIN32
+#include <fcntl.h> /* _O_BINARY, _O_RDWR */
+#include <io.h>    /* _open_osfhandle */
+#include "dqlite_win_pipe.h" /* DqliteWinPipeName: "@name" -> named-pipe path */
 
+/* Windows connect helper. The dqlite node's local ("@name") transport is
+ * carried over a Win32 named pipe (the Linux abstract-namespace AF_UNIX address
+ * cannot bind on Windows), so an "@name" address is opened by CreateFile on the
+ * mapped pipe path. A TCP ("host:port") address still does a blocking TCP
+ * connect. In both cases the returned descriptor is what the raft transport and
+ * the synchronous client expect: a named-pipe CRT fd (via _open_osfhandle) or a
+ * Winsock SOCKET widened to int. */
+static int endpointConnectPipe(const char *address, int *fd)
+{
+	char pipe_name[256];
+	HANDLE h;
+	int osfd;
+	int attempts;
+
+	DqliteWinPipeName(address, pipe_name, sizeof pipe_name);
+
+	/* Open the pipe. A "not found" here means the peer has not reached
+	 * uv_listen() yet: fail FAST and let the caller retry, exactly as a
+	 * POSIX connect() to an unbound abstract socket returns ECONNREFUSED
+	 * immediately and raft's reconnection timer retries later. Blocking here
+	 * (this runs on libuv's shared, bounded threadpool via connect_work_cb)
+	 * would pin a worker per not-yet-started peer and deadlock a multi-node
+	 * cluster. "Busy" (all instances momentarily in use) is transient, so
+	 * give it a bounded wait. The budget is generous (WaitNamedPipeA returns
+	 * as soon as an instance frees, not after the full timeout) so heavy
+	 * connection fan-in — e.g. the stress suite's readers*databases thundering
+	 * herd — doesn't spuriously exhaust it. */
+	for (attempts = 0;; attempts++) {
+		h = CreateFileA(pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+				OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+		if (h != INVALID_HANDLE_VALUE) {
+			break;
+		}
+		if (GetLastError() == ERROR_PIPE_BUSY && attempts < 200) {
+			WaitNamedPipeA(pipe_name, 100);
+			continue;
+		}
+		return -1;
+	}
+
+	osfd = _open_osfhandle((intptr_t)h, _O_RDWR | _O_BINARY);
+	if (osfd == -1) {
+		CloseHandle(h);
+		return -1;
+	}
+	*fd = osfd;
+	return 0;
+}
+
+static int endpointConnect(void *data, const char *address, int *fd)
+{
+	struct sockaddr_in addr;
+	const char *colon;
+	char host[64];
+	size_t host_len;
+	SOCKET s;
+	int rv;
+	(void)data;
+
+	if (address[0] == '@') {
+		return endpointConnectPipe(address, fd);
+	}
+
+	colon = strrchr(address, ':');
+	munit_assert_ptr(colon, !=, NULL);
+	host_len = (size_t)(colon - address);
+	munit_assert_size(host_len, <, sizeof host);
+	memcpy(host, address, host_len);
+	host[host_len] = '\0';
+
+	memset(&addr, 0, sizeof addr);
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons((unsigned short)atoi(colon + 1));
+	addr.sin_addr.s_addr = inet_addr(host);
+
+	s = socket(AF_INET, SOCK_STREAM, 0);
+	munit_assert_int((int)s, !=, -1);
+	rv = connect(s, (struct sockaddr *)&addr, sizeof addr);
+	*fd = (int)s;
+	return rv;
+}
+#else
 static int endpointConnect(void *data, const char *address, int *fd)
 {
 	struct sockaddr_un addr;
@@ -19,6 +105,7 @@ static int endpointConnect(void *data, const char *address, int *fd)
 		     sizeof(sa_family_t) + strlen(address + 1) + 1);
 	return rv;
 }
+#endif
 
 void test_server_setup(struct test_server *s,
 		       const unsigned id,
@@ -27,6 +114,9 @@ void test_server_setup(struct test_server *s,
 	(void)params;
 
 	s->id = id;
+	/* Local abstract-namespace address on Linux; on Windows the same "@ID"
+	 * address is carried over a Win32 named pipe (see endpointConnect and
+	 * dqliteNodeBindPipe in src/server.c). */
 	sprintf(s->address, "@%u", id);
 
 	s->dir = test_dir_setup();

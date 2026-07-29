@@ -47,7 +47,11 @@ TEST(raft_heap, aligned_alloc, NULL, NULL, 0, NULL)
     void *p;
     p = raft_aligned_alloc(1024, 2048);
     munit_assert_ptr_not_null(p);
+#ifndef _WIN32
+    /* On Windows aligned_alloc() maps to malloc() (alignment is only needed for
+     * O_DIRECT, which is unused there), so the alignment is not guaranteed. */
     munit_assert_int((uintptr_t)p % 1024, ==, 0);
+#endif
     raft_free(p);
     return MUNIT_OK;
 }

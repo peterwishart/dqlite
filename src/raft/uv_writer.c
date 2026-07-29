@@ -1,11 +1,71 @@
 #include "uv_writer.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "../lib/assert.h"
 #include "../raft.h"
 #include "heap.h"
+
+/* The raw-write path is factored behind a pluggable backend interface (the
+ * raft_io_fs seam). Everything else in this file -- request status/completion
+ * bookkeeping and the close/drain state machine -- is backend-agnostic and
+ * shared. Each backend only supplies the platform-specific way to set up
+ * resources, submit a single asynchronous write, and tear those resources down.
+ *
+ * Two backends are provided:
+ *
+ *   - "aio"        : Linux kernel AIO (io_submit/eventfd/uv_poll), the historical
+ *                    fast path. Compiled only when DQLITE_HAVE_KAIO is defined.
+ *   - "threadpool" : portable libuv threadpool + uv_fs_write. No Linux-only
+ *                    primitives; the basis for the macOS/Windows port.
+ *
+ * A future Windows IOCP backend or a Linux RWF_NOWAIT fast-path plugs in purely
+ * by adding another struct UvWriterBackend instance and selecting it in
+ * UvWriterInit -- callers, the UvWriter/UvWriterReq types, and the shared
+ * segment/prepare/finalize/truncate logic above this file stay unchanged. */
+struct UvWriterBackend
+{
+	const char *name;
+	/* Set up backend-specific resources on the (already zero-initialized)
+	 * writer. On failure, fill errmsg and return a RAFT_* error. */
+	int (*init)(struct UvWriter *w, char *errmsg);
+	/* Submit a single asynchronous write. The common request fields
+	 * (writer, len, status, cb, errmsg) have already been initialized by
+	 * UvWriterSubmit; the backend fills in its own per-request state and
+	 * schedules the write. Completion must eventually reach the shared
+	 * uvWriterReqFinish(). */
+	int (*submit)(struct UvWriter *w,
+		      struct UvWriterReq *req,
+		      const uv_buf_t bufs[],
+		      unsigned n,
+		      size_t offset);
+	/* Begin backend-specific teardown. Asynchronous: the writer's close_cb
+	 * fires later, once all handles are closed and in-flight requests have
+	 * drained. */
+	void (*close)(struct UvWriter *w);
+	/* Free backend-specific resources. Called once from the shared cleanup
+	 * path after all handles are closed. May be NULL if there is nothing to
+	 * free. */
+	void (*destroy)(struct UvWriter *w);
+};
+
+/* Whether the portable libuv-threadpool write backend has been forced via the
+ * DQLITE_IO_BACKEND=threadpool environment variable. This backend avoids the
+ * Linux-only kernel AIO / eventfd machinery and is the basis for the
+ * macOS/Windows port (see PORT_DESIGN.md). */
+static bool uvWriterThreadpoolForced(void)
+{
+	const char *env = getenv("DQLITE_IO_BACKEND");
+	return env != NULL && strcmp(env, "threadpool") == 0;
+}
+
+/******************************************************************************
+ *
+ * Shared request bookkeeping (backend-agnostic).
+ *
+ *****************************************************************************/
 
 /* Copy the error message from the request object to the writer object. */
 static void uvWriterReqTransferErrMsg(struct UvWriterReq *req)
@@ -40,6 +100,85 @@ static void uvWriterReqFinish(struct UvWriterReq *req)
 	req->cb(req, req->status);
 }
 
+/* Callback run after a threadpool worker (either backend) has returned. It
+ * normally invokes the write request callback. */
+static void uvWriterAfterWorkCb(uv_work_t *work, int status)
+{
+	struct UvWriterReq *req = work->data; /* Write file request object */
+	dqlite_assert(status == 0); /* We don't cancel worker requests */
+	uvWriterReqFinish(req);
+}
+
+/* Return the total lengths of the given buffers. */
+static size_t lenOfBufs(const uv_buf_t bufs[], unsigned n)
+{
+	size_t len = 0;
+	unsigned i;
+	for (i = 0; i < n; i++) {
+		len += bufs[i].len;
+	}
+	return len;
+}
+
+/******************************************************************************
+ *
+ * Shared close / drain state machine (backend-agnostic).
+ *
+ *****************************************************************************/
+
+static void uvWriterCleanUpAndFireCloseCb(struct UvWriter *w)
+{
+	dqlite_assert(w->closing);
+
+	UvOsClose(w->fd);
+	if (w->backend->destroy != NULL) {
+		w->backend->destroy(w);
+	}
+
+	if (w->close_cb != NULL) {
+		w->close_cb(w);
+	}
+}
+
+static void uvWriterCheckCloseCb(struct uv_handle_s *handle)
+{
+	struct UvWriter *w = handle->data;
+	w->check.data = NULL;
+	/* The AIO backend closes an additional poller handle; wait for it too.
+	 * For the threadpool backend event_poller.data is always NULL. */
+	if (w->event_poller.data != NULL) {
+		return;
+	}
+	uvWriterCleanUpAndFireCloseCb(w);
+}
+
+static void uvWriterCheckCb(struct uv_check_s *check)
+{
+	struct UvWriter *w = check->data;
+	if (!queue_empty(&w->work_queue)) {
+		return;
+	}
+	uv_close((struct uv_handle_s *)&w->check, uvWriterCheckCloseCb);
+}
+
+/* Wait for any in-flight threadpool writes to drain, then close the check
+ * handle. Shared tail of every backend's close path. */
+static void uvWriterDrainThenClose(struct UvWriter *w)
+{
+	if (!queue_empty(&w->work_queue)) {
+		uv_check_start(&w->check, uvWriterCheckCb);
+	} else {
+		uv_close((struct uv_handle_s *)&w->check, uvWriterCheckCloseCb);
+	}
+}
+
+/******************************************************************************
+ *
+ * Backend: kernel AIO (Linux only).
+ *
+ *****************************************************************************/
+
+#if defined(DQLITE_HAVE_KAIO)
 /* Wrapper around the low-level OS syscall, providing a better error message. */
 static int uvWriterIoSetup(unsigned n, aio_context_t *ctx, char *errmsg)
 {
@@ -127,15 +266,6 @@ out:
 	}
 
 	return;
-}
-
-/* Callback run after writeWorkCb has returned. It normally invokes the write
- * request callback. */
-static void uvWriterAfterWorkCb(uv_work_t *work, int status)
-{
-	struct UvWriterReq *req = work->data; /* Write file request object */
-	dqlite_assert(status == 0); /* We don't cancel worker requests */
-	uvWriterReqFinish(req);
 }
 
 /* Callback fired when the event fd associated with AIO write requests should be
@@ -229,42 +359,32 @@ fail_requests:
 	}
 }
 
-int UvWriterInit(struct UvWriter *w,
-		 struct uv_loop_s *loop,
-		 uv_file fd,
-		 bool direct /* Whether to use direct I/O */,
-		 bool async /* Whether async I/O is available */,
-		 unsigned max_concurrent_writes,
-		 char *errmsg)
+static void uvWriterPollerCloseCb(struct uv_handle_s *handle)
 {
-	void *data = w->data;
-	int rv = 0;
-	memset(w, 0, sizeof *w);
-	w->data = data;
-	w->loop = loop;
-	w->fd = fd;
-	w->async = async;
-	w->ctx = 0;
-	w->events = NULL;
-	w->n_events = max_concurrent_writes;
-	w->event_fd = -1;
+	struct UvWriter *w = handle->data;
 	w->event_poller.data = NULL;
-	w->check.data = NULL;
-	w->close_cb = NULL;
-	queue_init(&w->poll_queue);
-	queue_init(&w->work_queue);
-	w->closing = false;
-	w->errmsg = errmsg;
 
-	/* Set direct I/O if available. */
-	if (direct) {
-		rv = UvOsSetDirectIo(w->fd);
-		if (rv != 0) {
-			UvOsErrMsg(errmsg, "fcntl", rv);
-			rv = RAFT_IOERR;
-			goto err;
-		}
+	/* Cancel all pending requests. */
+	while (!queue_empty(&w->poll_queue)) {
+		queue *head;
+		struct UvWriterReq *req;
+		head = queue_head(&w->poll_queue);
+		req = QUEUE_DATA(head, struct UvWriterReq, queue);
+		dqlite_assert(req->work.data == NULL);
+		req->status = RAFT_CANCELED;
+		uvWriterReqFinish(req);
 	}
+
+	if (w->check.data != NULL) {
+		return;
+	}
+
+	uvWriterCleanUpAndFireCloseCb(w);
+}
+
+static int uvWriterAioInit(struct UvWriter *w, char *errmsg)
+{
+	int rv;
 
 	/* Setup the AIO context. */
 	rv = uvWriterIoSetup(w->n_events, &w->ctx, errmsg);
@@ -292,7 +412,7 @@ int UvWriterInit(struct UvWriter *w,
 	}
 	w->event_fd = rv;
 
-	rv = uv_poll_init(loop, &w->event_poller, w->event_fd);
+	rv = uv_poll_init(w->loop, &w->event_poller, w->event_fd);
 	if (rv != 0) {
 		/* UNTESTED: with the current libuv implementation this should
 		 * never fail. */
@@ -302,7 +422,7 @@ int UvWriterInit(struct UvWriter *w,
 	}
 	w->event_poller.data = w;
 
-	rv = uv_check_init(loop, &w->check);
+	rv = uv_check_init(w->loop, &w->check);
 	if (rv != 0) {
 		/* UNTESTED: with the current libuv implementation this should
 		 * never fail. */
@@ -334,108 +454,14 @@ err:
 	return rv;
 }
 
-static void uvWriterCleanUpAndFireCloseCb(struct UvWriter *w)
+static int uvWriterAioSubmit(struct UvWriter *w,
+			     struct UvWriterReq *req,
+			     const uv_buf_t bufs[],
+			     unsigned n,
+			     size_t offset)
 {
-	dqlite_assert(w->closing);
-
-	UvOsClose(w->fd);
-	RaftHeapFree(w->events);
-	UvOsIoDestroy(w->ctx);
-
-	if (w->close_cb != NULL) {
-		w->close_cb(w);
-	}
-}
-
-static void uvWriterPollerCloseCb(struct uv_handle_s *handle)
-{
-	struct UvWriter *w = handle->data;
-	w->event_poller.data = NULL;
-
-	/* Cancel all pending requests. */
-	while (!queue_empty(&w->poll_queue)) {
-		queue *head;
-		struct UvWriterReq *req;
-		head = queue_head(&w->poll_queue);
-		req = QUEUE_DATA(head, struct UvWriterReq, queue);
-		dqlite_assert(req->work.data == NULL);
-		req->status = RAFT_CANCELED;
-		uvWriterReqFinish(req);
-	}
-
-	if (w->check.data != NULL) {
-		return;
-	}
-
-	uvWriterCleanUpAndFireCloseCb(w);
-}
-
-static void uvWriterCheckCloseCb(struct uv_handle_s *handle)
-{
-	struct UvWriter *w = handle->data;
-	w->check.data = NULL;
-	if (w->event_poller.data != NULL) {
-		return;
-	}
-	uvWriterCleanUpAndFireCloseCb(w);
-}
-
-static void uvWriterCheckCb(struct uv_check_s *check)
-{
-	struct UvWriter *w = check->data;
-	if (!queue_empty(&w->work_queue)) {
-		return;
-	}
-	uv_close((struct uv_handle_s *)&w->check, uvWriterCheckCloseCb);
-}
-
-void UvWriterClose(struct UvWriter *w, UvWriterCloseCb cb)
-{
-	int rv;
-	dqlite_assert(!w->closing);
-	w->closing = true;
-	w->close_cb = cb;
-
-	/* We can close the event file descriptor right away, but we shouldn't
-	 * close the main file descriptor or destroy the AIO context since there
-	 * might be threadpool requests in flight. */
-	UvOsClose(w->event_fd);
-
-	rv = uv_poll_stop(&w->event_poller);
-	dqlite_assert(rv == 0); /* Can this ever fail? */
-
-	uv_close((struct uv_handle_s *)&w->event_poller, uvWriterPollerCloseCb);
-
-	/* If we have requests executing in the threadpool, we need to wait for
-	 * them. That's done in the check callback. */
-	if (!queue_empty(&w->work_queue)) {
-		uv_check_start(&w->check, uvWriterCheckCb);
-	} else {
-		uv_close((struct uv_handle_s *)&w->check, uvWriterCheckCloseCb);
-	}
-}
-
-/* Return the total lengths of the given buffers. */
-static size_t lenOfBufs(const uv_buf_t bufs[], unsigned n)
-{
-	size_t len = 0;
-	unsigned i;
-	for (i = 0; i < n; i++) {
-		len += bufs[i].len;
-	}
-	return len;
-}
-
-int UvWriterSubmit(struct UvWriter *w,
-		   struct UvWriterReq *req,
-		   const uv_buf_t bufs[],
-		   unsigned n,
-		   size_t offset,
-		   UvWriterReqCb cb)
-{
-	int rv = 0;
 	struct iocb *iocbs = &req->iocb;
-	dqlite_assert(!w->closing);
+	int rv;
 
 	/* TODO: at the moment we are not leveraging the support for concurrent
 	 *       writes, so ensure that we're getting write requests
@@ -445,20 +471,11 @@ int UvWriterSubmit(struct UvWriter *w,
 		dqlite_assert(queue_empty(&w->work_queue));
 	}
 
-	dqlite_assert(w->fd >= 0);
 	dqlite_assert(w->event_fd >= 0);
 	dqlite_assert(w->ctx != 0);
-	dqlite_assert(req != NULL);
-	dqlite_assert(bufs != NULL);
-	dqlite_assert(n > 0);
 
-	req->writer = w;
-	req->len = lenOfBufs(bufs, n);
-	req->status = -1;
 	req->work.data = NULL;
-	req->cb = cb;
 	memset(&req->iocb, 0, sizeof req->iocb);
-	memset(req->errmsg, 0, sizeof req->errmsg);
 
 	req->iocb.aio_fildes = (uint32_t)w->fd;
 	req->iocb.aio_lio_opcode = IOCB_CMD_PWRITEV;
@@ -542,4 +559,202 @@ done:
 err:
 	dqlite_assert(rv != 0);
 	return rv;
+}
+
+static void uvWriterAioClose(struct UvWriter *w)
+{
+	int rv;
+
+	/* We can close the event file descriptor right away, but we shouldn't
+	 * close the main file descriptor or destroy the AIO context since there
+	 * might be threadpool requests in flight. */
+	UvOsClose(w->event_fd);
+
+	rv = uv_poll_stop(&w->event_poller);
+	dqlite_assert(rv == 0); /* Can this ever fail? */
+
+	uv_close((struct uv_handle_s *)&w->event_poller, uvWriterPollerCloseCb);
+
+	/* If we have requests executing in the threadpool, we need to wait for
+	 * them. That's done in the check callback. */
+	uvWriterDrainThenClose(w);
+}
+
+static void uvWriterAioDestroy(struct UvWriter *w)
+{
+	RaftHeapFree(w->events);
+	UvOsIoDestroy(w->ctx);
+}
+
+static const struct UvWriterBackend uvWriterAioBackend = {
+	.name = "aio",
+	.init = uvWriterAioInit,
+	.submit = uvWriterAioSubmit,
+	.close = uvWriterAioClose,
+	.destroy = uvWriterAioDestroy,
+};
+#endif /* DQLITE_HAVE_KAIO */
+
+/******************************************************************************
+ *
+ * Backend: portable libuv threadpool (Linux/macOS/Windows).
+ *
+ *****************************************************************************/
+
+/* Threadpool worker for the portable backend: perform a plain blocking write
+ * via libuv's cross-platform uv_fs_write (pwritev on POSIX, WriteFile on
+ * Windows). Runs off the loop thread; uvWriterAfterWorkCb finishes the request
+ * back on the loop thread. */
+static void uvWriterWorkCbPortable(uv_work_t *work)
+{
+	struct UvWriterReq *req = work->data;
+	struct UvWriter *w = req->writer;
+	int rv = UvOsWrite(w->fd, req->tp_bufs, req->tp_nbufs, req->tp_offset);
+	uvWriterReqSetStatus(req, rv);
+}
+
+static int uvWriterThreadpoolInit(struct UvWriter *w, char *errmsg)
+{
+	/* No kernel AIO context, eventfd, or poller. Writes run as blocking
+	 * uv_fs_write calls in the libuv threadpool. Only the check handle
+	 * (used to drain in-flight work on close) is needed. */
+	int rv = uv_check_init(w->loop, &w->check);
+	if (rv != 0) {
+		UvOsErrMsg(errmsg, "uv_check_init", rv);
+		return RAFT_IOERR;
+	}
+	w->check.data = w;
+	return 0;
+}
+
+static int uvWriterThreadpoolSubmit(struct UvWriter *w,
+				    struct UvWriterReq *req,
+				    const uv_buf_t bufs[],
+				    unsigned n,
+				    size_t offset)
+{
+	int rv;
+
+	req->work.data = req;
+	req->tp_bufs = bufs;
+	req->tp_nbufs = n;
+	req->tp_offset = (int64_t)offset;
+
+	queue_insert_tail(&w->work_queue, &req->queue);
+	rv = uv_queue_work(w->loop, &req->work, uvWriterWorkCbPortable,
+			   uvWriterAfterWorkCb);
+	if (rv != 0) {
+		/* UNTESTED: with the current libuv implementation this
+		 * can't fail. */
+		req->work.data = NULL;
+		queue_remove(&req->queue);
+		UvOsErrMsg(w->errmsg, "uv_queue_work", rv);
+		return RAFT_IOERR;
+	}
+	return 0;
+}
+
+static void uvWriterThreadpoolClose(struct UvWriter *w)
+{
+	/* No eventfd/poller to tear down. Just wait for any in-flight
+	 * threadpool writes to drain via the check handle. */
+	uvWriterDrainThenClose(w);
+}
+
+static const struct UvWriterBackend uvWriterThreadpoolBackend = {
+	.name = "threadpool",
+	.init = uvWriterThreadpoolInit,
+	.submit = uvWriterThreadpoolSubmit,
+	.close = uvWriterThreadpoolClose,
+	.destroy = NULL,
+};
+
+/******************************************************************************
+ *
+ * Public interface (backend-agnostic).
+ *
+ *****************************************************************************/
+
+int UvWriterInit(struct UvWriter *w,
+		 struct uv_loop_s *loop,
+		 uv_file fd,
+		 bool direct /* Whether to use direct I/O */,
+		 bool async /* Whether async I/O is available */,
+		 unsigned max_concurrent_writes,
+		 char *errmsg)
+{
+	void *data = w->data;
+	int rv;
+	bool threadpool;
+
+	memset(w, 0, sizeof *w);
+	w->data = data;
+	w->loop = loop;
+	w->fd = fd;
+	w->async = async;
+	w->n_events = max_concurrent_writes;
+	w->event_fd = -1;
+	w->event_poller.data = NULL;
+	w->check.data = NULL;
+	w->close_cb = NULL;
+	queue_init(&w->poll_queue);
+	queue_init(&w->work_queue);
+	w->closing = false;
+	w->errmsg = errmsg;
+
+	/* Select the raw-write backend. The portable threadpool backend is used
+	 * when explicitly forced or whenever fully async kernel I/O is
+	 * unavailable (always on macOS/Windows); otherwise the kernel-AIO fast
+	 * path is used. */
+	threadpool = uvWriterThreadpoolForced() || !async;
+	w->threadpool = threadpool;
+#if defined(DQLITE_HAVE_KAIO)
+	w->backend =
+	    threadpool ? &uvWriterThreadpoolBackend : &uvWriterAioBackend;
+#else
+	/* Without kernel AIO only the portable backend exists. */
+	dqlite_assert(threadpool);
+	w->backend = &uvWriterThreadpoolBackend;
+#endif
+
+	/* Set direct I/O if available. */
+	if (direct) {
+		rv = UvOsSetDirectIo(w->fd);
+		if (rv != 0) {
+			UvOsErrMsg(errmsg, "fcntl", rv);
+			return RAFT_IOERR;
+		}
+	}
+
+	return w->backend->init(w, errmsg);
+}
+
+void UvWriterClose(struct UvWriter *w, UvWriterCloseCb cb)
+{
+	dqlite_assert(!w->closing);
+	w->closing = true;
+	w->close_cb = cb;
+	w->backend->close(w);
+}
+
+int UvWriterSubmit(struct UvWriter *w,
+		   struct UvWriterReq *req,
+		   const uv_buf_t bufs[],
+		   unsigned n,
+		   size_t offset,
+		   UvWriterReqCb cb)
+{
+	dqlite_assert(!w->closing);
+	dqlite_assert(w->fd >= 0);
+	dqlite_assert(req != NULL);
+	dqlite_assert(bufs != NULL);
+	dqlite_assert(n > 0);
+
+	req->writer = w;
+	req->len = lenOfBufs(bufs, n);
+	req->status = -1;
+	req->cb = cb;
+	memset(req->errmsg, 0, sizeof req->errmsg);
+
+	return w->backend->submit(w, req, bufs, n, offset);
 }

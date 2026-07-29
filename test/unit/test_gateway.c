@@ -94,11 +94,20 @@ struct connection {
 	}                                                  \
 	TEAR_DOWN_CLUSTER;
 
+/* O_BINARY is Windows-only; on POSIX open() is always binary, so define it
+ * as a no-op there. Without it, the CRT opens the file in text mode on Windows
+ * and write() inserts a 0x0D before every 0x0A byte, corrupting the binary
+ * database image before SQLite reads it back for the integrity check. */
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+
 #define INTEGRITY_CHECK(file)                                                 \
 	do {                                                                  \
 		char path[PATH_MAX] = {};                                     \
 		snprintf(path, PATH_MAX, "%s/%s", f->temp_dir, (file).name);  \
-		int fd = open(path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);     \
+		int fd =                                                      \
+		    open(path, O_CREAT | O_RDWR | O_BINARY, S_IRUSR | S_IWUSR); \
 		munit_assert_int(fd, >, 0);                                   \
 		ssize_t write_rv =                                            \
 		    write(fd, (file).content.base, (file).content.len);       \
@@ -1534,7 +1543,15 @@ TEST_CASE(query, one_row, NULL)
  * and an 8B EOF marker. */
 static unsigned max_rows_buffer(unsigned tuple_row_sz)
 {
+#ifdef _WIN32
+	/* The gateway's row batch flushes at buffer__init's page_size, which on
+	 * Windows is the true 4KiB CPU page size (dqlite_win_page_size()), not
+	 * sysconf(_SC_PAGESIZE) (== 64KiB allocation granularity on Win32). Use
+	 * the same value so the expected rows-per-response matches. */
+	unsigned buf_sz = dqlite_win_page_size();
+#else
 	unsigned buf_sz = sysconf(_SC_PAGESIZE);
+#endif
 	unsigned eof_sz = 8;
 	return (buf_sz - eof_sz) / tuple_row_sz;
 }
