@@ -90,24 +90,53 @@ int UvFsCheckDir(const char *dir, char *errmsg)
 int UvFsSyncDir(const char *dir, char *errmsg)
 {
 #ifdef _WIN32
-	/* On Windows, libuv's uv_fs_open() cannot obtain a directory handle: it
-	 * does not pass FILE_FLAG_BACKUP_SEMANTICS to CreateFile, so opening an
-	 * existing directory fails. NTFS also provides no directory fsync.
-	 * Open the directory explicitly with backup semantics, which (a) still
-	 * fails for a non-existent path -- preserving the POSIX error path and
-	 * the exact "open directory: no such file or directory" message used by
-	 * the tests -- and (b) lets us best-effort flush its metadata.
-	 * FlushFileBuffers on a directory handle is not supported by NTFS, so its
-	 * failure is intentionally ignored. */
-	HANDLE h = CreateFileA(dir, GENERIC_READ,
-			       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-			       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	/* Windows directory-sync story (see README.md "Durability on Windows").
+	 *
+	 * On POSIX this function fsync()s the directory so that the creation or
+	 * rename of a segment/snapshot file is itself on stable storage. Win32
+	 * has no exact equivalent, but an NTFS directory CAN be flushed: open a
+	 * directory handle with FILE_FLAG_BACKUP_SEMANTICS (required by
+	 * CreateFile to open a directory at all -- libuv's uv_fs_open() cannot
+	 * do this) plus write access, and call FlushFileBuffers() on it, which
+	 * forces the volume's pending NTFS metadata log records to disk.
+	 * FlushFileBuffers requires a write-capable handle: with GENERIC_READ
+	 * only it fails with ERROR_ACCESS_DENIED (verified on Windows 11/NTFS),
+	 * which is exactly the failure an earlier version of this code silently
+	 * swallowed -- i.e. the flush never actually happened.
+	 *
+	 * So: ask for GENERIC_WRITE too, and propagate a flush failure instead
+	 * of ignoring it. If the directory exists but write access is denied
+	 * (restrictive ACL), fall back to a read-only open purely to preserve
+	 * the POSIX error semantics for missing paths, skip the flush, and
+	 * rely on NTFS metadata journaling alone: NTFS logs create/rename
+	 * operations and replays them on mount, preserving their ordering
+	 * across a crash, so the worst case is losing the very latest metadata
+	 * updates, not reordering them -- the same guarantee dqlite relies on
+	 * for the rename-based segment/snapshot commit protocol. */
+	HANDLE h = CreateFileA(
+	    dir, GENERIC_READ | GENERIC_WRITE,
+	    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+	    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	bool flush = true;
+	if (h == INVALID_HANDLE_VALUE &&
+	    GetLastError() == ERROR_ACCESS_DENIED) {
+		flush = false;
+		h = CreateFileA(
+		    dir, GENERIC_READ,
+		    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		    NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+	}
 	if (h == INVALID_HANDLE_VALUE) {
 		int rv = uv_translate_sys_error((int)GetLastError());
 		UvOsErrMsg(errmsg, "open directory", rv);
 		return RAFT_IOERR;
 	}
-	(void)FlushFileBuffers(h);
+	if (flush && !FlushFileBuffers(h)) {
+		int rv = uv_translate_sys_error((int)GetLastError());
+		CloseHandle(h);
+		UvOsErrMsg(errmsg, "flush directory", rv);
+		return RAFT_IOERR;
+	}
 	CloseHandle(h);
 	return 0;
 #else
@@ -1224,11 +1253,15 @@ static int probeDirectIO(int fd, size_t *size, char *errmsg)
 #elif defined(_WIN32)
 	/* Windows has no O_DIRECT. The portable UvOsSetDirectIo() reports
 	 * UV_ENOTSUP and FILE_FLAG_NO_BUFFERING (the Win32 O_DIRECT equivalent)
-	 * is deliberately NOT used -- dqlite's Windows write path is buffered
-	 * writes + fsync on the libuv threadpool. Report direct I/O as
-	 * unavailable (block size 0) so UvFsProbeCapabilities sets async = false
-	 * and the caller selects the threadpool backend, mirroring the __APPLE__
-	 * path above.
+	 * is deliberately NOT used. dqlite's Windows write path is instead:
+	 * segment files opened write-through (O_DSYNC maps to UV_FS_O_DSYNC,
+	 * i.e. FILE_FLAG_WRITE_THROUGH -- see compat/win/dqlite_win_prelude.h)
+	 * and written on the libuv threadpool, with an explicit fdatasync
+	 * (FlushFileBuffers) after every write (see uvWriterWorkCbPortable in
+	 * uv_writer.c and the README.md "Durability on Windows" note). Report
+	 * direct I/O as unavailable (block size 0) so UvFsProbeCapabilities
+	 * sets async = false and the caller selects the threadpool backend,
+	 * mirroring the __APPLE__ path above.
 	 *
 	 * This explicit early-return is deliberate: without it the Linux probe
 	 * below would compile on Windows (via the <sys/vfs.h>/fstatfs compat

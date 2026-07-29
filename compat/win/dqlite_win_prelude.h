@@ -176,12 +176,23 @@ static inline int clock_gettime(clockid_t clk_id, struct timespec *tp)
 #define S_IRWXO 0007
 #endif
 
-/* open(2) flags with no UCRT equivalent -> defined as 0 (no-op) so the flag
- * arithmetic compiles. NOTE: this drops the semantics (O_DSYNC durability,
- * O_NONBLOCK, O_CLOEXEC) -- a real Win32 port must restore them (worklist). */
+/* O_DSYNC: UCRT has no O_DSYNC, but libuv's Windows uv_fs_open() understands
+ * UV_FS_O_DSYNC (0x04000000, see uv/win.h) and maps it to CreateFile's
+ * FILE_FLAG_WRITE_THROUGH (libuv src/win/fs.c, fs__open). Every open(2)-flag
+ * word in dqlite that carries O_DSYNC reaches the kernel exclusively through
+ * uv_fs_open() (src/raft/uv_os.c UvOsOpen), so defining O_DSYNC to the
+ * UV_FS_O_DSYNC value restores real synchronized-write semantics on Windows:
+ * raft segment writes go through the OS cache straight to the device. The
+ * value is asserted to match UV_FS_O_DSYNC in src/raft/uv_os.c (which can see
+ * both macros). It deliberately does NOT collide with any UCRT _O_* flag.
+ * See the "Durability on Windows" section in README.md. */
 #ifndef O_DSYNC
-#define O_DSYNC 0
+#define O_DSYNC 0x04000000
 #endif
+
+/* open(2) flags with no UCRT/libuv equivalent -> defined as 0 (no-op) so the
+ * flag arithmetic compiles. NOTE: this drops the semantics (O_NONBLOCK,
+ * O_CLOEXEC) -- acceptable because no durability guarantee depends on them. */
 #ifndef O_NONBLOCK
 #define O_NONBLOCK 0
 #endif
@@ -413,14 +424,24 @@ static inline int posix_fadvise(int fd, long long offset, long long len, int adv
 	return 0;
 }
 
-/* ---- posix_fallocate: implemented via _chsize_s -------------------------
- * Ensure the file backing `fd` has at least offset+len bytes. _chsize_s grows
- * the file (zero-filled) to the requested size; we only ever grow (never
- * truncate) by taking max(current, offset+len). POSIX contract: return 0 on
- * success or a positive errno-style code on failure, and do NOT set errno --
- * _chsize_s already returns exactly such a code. */
+/* ---- posix_fallocate: implemented via SetEndOfFile ------------------------
+ * Ensure the file backing `fd` has at least offset+len bytes. We only ever
+ * grow (never truncate) by taking max(current, offset+len). POSIX contract:
+ * return 0 on success or a positive errno-style code on failure, and do NOT
+ * set errno.
+ *
+ * Implementation note: extending via SetFileInformationByHandle(
+ * FileEndOfFileInfo) is metadata-only. On NTFS it still reserves the clusters
+ * immediately (ENOSPC surfaces here, as posix_fallocate requires, for
+ * non-sparse files) but defers zero-filling via the valid-data-length
+ * mechanism, which sequential writers -- raft only ever appends to its
+ * segments -- never pay for. The previous implementation used _chsize_s,
+ * which zero-fills by physically writing: ~537 ms for an 8 MiB segment on a
+ * FILE_FLAG_WRITE_THROUGH handle (measured, NVMe). Since O_DSYNC maps to
+ * write-through on Windows (see above), that would make every raft segment
+ * preparation take ~0.5 s and starve the event loop tests. */
 #include <errno.h>
-#include <io.h>    /* _chsize_s, _lseeki64 */
+#include <io.h>    /* _get_osfhandle, _lseeki64 */
 #include <stdio.h> /* SEEK_END */
 static inline int posix_fallocate(int fd, long long offset, long long len)
 {
@@ -432,7 +453,20 @@ static inline int posix_fallocate(int fd, long long offset, long long len)
 	if (want <= cur) {
 		return 0;
 	}
-	return _chsize_s(fd, want);
+	{
+		HANDLE h = (HANDLE)_get_osfhandle(fd);
+		FILE_END_OF_FILE_INFO info;
+		if (h == INVALID_HANDLE_VALUE) {
+			return EBADF;
+		}
+		info.EndOfFile.QuadPart = want;
+		if (!SetFileInformationByHandle(h, FileEndOfFileInfo, &info,
+						sizeof info)) {
+			return GetLastError() == ERROR_DISK_FULL ? ENOSPC
+								 : EIO;
+		}
+	}
+	return 0;
 }
 
 /* ---- __assert_fail (glibc) -----------------------------------------------

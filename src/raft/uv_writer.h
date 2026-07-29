@@ -28,6 +28,12 @@ struct UvWriter
 	bool async;              /* Whether fully async I/O is supported */
 	bool threadpool;         /* Use the portable libuv-threadpool backend
 				  * (no kernel AIO/eventfd) instead of KAIO */
+#if defined(_WIN32)
+	bool sync;               /* fd was opened write-through (O_DSYNC): the
+				  * portable write path follows every write
+				  * with fdatasync. See uv_writer.c and the
+				  * README.md "Durability on Windows" note. */
+#endif
 	const struct UvWriterBackend *backend; /* Raw-write backend vtable */
 #if defined(DQLITE_HAVE_KAIO)
 	aio_context_t ctx;       /* KAIO handle */

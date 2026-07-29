@@ -601,6 +601,66 @@ static const struct UvWriterBackend uvWriterAioBackend = {
  *
  *****************************************************************************/
 
+#if defined(_WIN32)
+#include <io.h> /* _get_osfhandle */
+
+/* Windows durability (route B, see README.md "Durability on Windows"):
+ * detect whether the OS handle backing a writer's fd was opened write-through
+ * (FILE_FLAG_WRITE_THROUGH), i.e. whether O_DSYNC semantics were requested at
+ * open time via the compat O_DSYNC -> UV_FS_O_DSYNC mapping. The query is
+ * NtQueryInformationFile(FileModeInformation); it lives in ntdll, which dqlite
+ * does not link against, so resolve it dynamically (ntdll is always loaded). */
+struct uvWriterNtIoStatusBlock
+{
+	union {
+		LONG Status;
+		PVOID Pointer;
+	} u;
+	ULONG_PTR Information;
+};
+struct uvWriterNtFileModeInformation
+{
+	ULONG Mode;
+};
+#define UV__NT_FILE_MODE_INFORMATION 16      /* FileModeInformation */
+#define UV__NT_FILE_WRITE_THROUGH 0x00000002 /* FILE_WRITE_THROUGH */
+typedef LONG(WINAPI *uvWriterNtQueryInformationFileFn)(
+    HANDLE,
+    struct uvWriterNtIoStatusBlock *,
+    PVOID,
+    ULONG,
+    ULONG /* FILE_INFORMATION_CLASS */);
+
+/* Return whether the file handle backing fd was opened with write-through
+ * (O_DSYNC) semantics. If the answer cannot be determined, err on the side of
+ * durability and report true (the portable write path will then issue a
+ * redundant-at-worst flush). */
+static bool uvWriterFdRequestedDsync(uv_file fd)
+{
+	uvWriterNtQueryInformationFileFn query;
+	struct uvWriterNtIoStatusBlock iosb;
+	struct uvWriterNtFileModeInformation info = {0};
+	HANDLE handle;
+	LONG status;
+
+	handle = (HANDLE)_get_osfhandle(fd);
+	if (handle == INVALID_HANDLE_VALUE) {
+		return true;
+	}
+	query = (uvWriterNtQueryInformationFileFn)(void *)GetProcAddress(
+	    GetModuleHandleA("ntdll.dll"), "NtQueryInformationFile");
+	if (query == NULL) {
+		return true;
+	}
+	status = query(handle, &iosb, &info, sizeof info,
+		       UV__NT_FILE_MODE_INFORMATION);
+	if (status != 0) {
+		return true;
+	}
+	return (info.Mode & UV__NT_FILE_WRITE_THROUGH) != 0;
+}
+#endif /* _WIN32 */
+
 /* Threadpool worker for the portable backend: perform a plain blocking write
  * via libuv's cross-platform uv_fs_write (pwritev on POSIX, WriteFile on
  * Windows). Runs off the loop thread; uvWriterAfterWorkCb finishes the request
@@ -610,6 +670,25 @@ static void uvWriterWorkCbPortable(uv_work_t *work)
 	struct UvWriterReq *req = work->data;
 	struct UvWriter *w = req->writer;
 	int rv = UvOsWrite(w->fd, req->tp_bufs, req->tp_nbufs, req->tp_offset);
+#if defined(_WIN32)
+	/* Windows durability (route B): FILE_FLAG_WRITE_THROUGH (route A, the
+	 * O_DSYNC -> UV_FS_O_DSYNC mapping in the compat prelude) pushes the
+	 * write past the OS file cache, but the storage device may still hold
+	 * it in its own volatile cache -- NTFS requests FUA for write-through
+	 * writes, and consumer SATA disks commonly ignore FUA. Follow every
+	 * write on an O_DSYNC writer with an explicit fdatasync (libuv
+	 * implements it as FlushFileBuffers, which sends a cache-flush command
+	 * to the device), giving the same guarantee O_DSYNC provides on Linux.
+	 * Still on the threadpool worker, so the loop thread is unaffected.
+	 * Linux is untouched: there O_DSYNC is real and this block does not
+	 * compile. */
+	if (rv >= 0 && w->sync) {
+		int frv = UvOsFdatasync(w->fd);
+		if (frv != 0) {
+			rv = frv;
+		}
+	}
+#endif
 	uvWriterReqSetStatus(req, rv);
 }
 
@@ -691,6 +770,13 @@ int UvWriterInit(struct UvWriter *w,
 	w->data = data;
 	w->loop = loop;
 	w->fd = fd;
+#if defined(_WIN32)
+	/* Windows durability: remember whether this fd was opened with O_DSYNC
+	 * (write-through) semantics, so that the portable write path can follow
+	 * each write with an explicit fdatasync. All production writers qualify
+	 * (their fds come from UvFsAllocateFile, which requests O_DSYNC). */
+	w->sync = uvWriterFdRequestedDsync(fd);
+#endif
 	w->async = async;
 	w->n_events = max_concurrent_writes;
 	w->event_fd = -1;

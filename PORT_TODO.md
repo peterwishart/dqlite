@@ -600,9 +600,40 @@ item is done, not whether):
 
 ### 11.1 Issues from review §4.2 (in order)
 
-- [ ] **W1 — CRITICAL: the raft log is not crash-durable on Windows.**
+- [x] **W1 — CRITICAL: the raft log is not crash-durable on Windows.**
       *This is the single blocking correctness defect on the branch; do it first
       and do not let anything else land in front of it.*
+      **DONE (2026-07-29), routes A+B both implemented.** (A) prelude `O_DSYNC`
+      `0`→`0x04000000` (= libuv `UV_FS_O_DSYNC`, verified in vcpkg uv/win.h:693
+      → `FILE_FLAG_WRITE_THROUGH` in fs__open; runtime-probed via
+      `NtQueryInformationFile(FileModeInformation)` = mode `0x22`, flag SET);
+      `_Static_assert(O_DSYNC == UV_FS_O_DSYNC)` in `uv_os.c` guards libuv
+      upgrades. (B) `UvWriter.sync` (`_WIN32`-only field) detected at init via
+      NtQueryInformationFile (GetProcAddress, no ntdll link);
+      `uvWriterWorkCbPortable` issues `UvOsFdatasync` (FlushFileBuffers =
+      device cache flush; WRITE_THROUGH alone only requests FUA, which consumer
+      disks ignore) after every successful write; flush failure → RAFT_IOERR.
+      `UvFsSyncDir` `_WIN32` branch now opens `GENERIC_READ|GENERIC_WRITE`
+      (FlushFileBuffers on a read-only dir handle fails gle=5 — the old code's
+      swallowed error meant the flush NEVER happened) and PROPAGATES failure;
+      ACL-denied fallback = read-only open, flush skipped, NTFS metadata
+      journaling ordering relied on (documented in comment + README). False
+      "buffered+fsync" comment rewritten; README gained "Durability on
+      Windows". **Regression found+fixed:** real write-through made the
+      `_chsize_s` fallocate shim zero-fill at ~537ms/8MiB segment (starved
+      loop-budgeted tests) → `SetFileInformationByHandle(FileEndOfFileInfo)`
+      (metadata-only, 0.3ms, still reserves NTFS clusters so ENOSPC surfaces at
+      allocate). The `~O_DSYNC` reopen pair is now live and correct
+      (`UvFsAllocateFile` 6/6 under `fallocate=0`). Cost: ~1.1ms/op
+      write+flush vs 0.039 buffered (NVMe) — the price of the guarantee; suite
+      wall-time unchanged (fallocate fix pays it back). Verified:
+      `raft-uv-integration` 212/212 (34 skip), `unit-test` 319/319,
+      `raft-uv-unit` 20/20, `stress` 45/45. Linux proven byte-identical
+      (all functional edits `_WIN32`-guarded; mechanical `-U_WIN32` view diff
+      of the 4 shared files = identical). Pre-existing (baseline-reproduced,
+      NOT W1): full `integration-test.exe` hangs at `node/stopInflightReads`
+      on this machine — cf. §9's known ASan-build hang, now seen on the normal
+      build too; needs its own investigation.
   - **Verified evidence.** (i) `compat/win/dqlite_win_prelude.h:182-184` defines
     `O_DSYNC` as `0` (self-documented as dropping the semantics). (ii)
     `src/raft/uv_fs.c:347` opens every segment with

@@ -199,6 +199,45 @@ build-win\raft-uv-unit-test.exe
 build-win\raft-uv-integration-test.exe
 ```
 
+### Durability on Windows
+
+On Linux, dqlite makes an acknowledged raft log entry crash-durable by writing
+segment files opened with `O_DSYNC` (plus `fsync` on the containing directory
+after creates/renames). The Windows port preserves that guarantee with the
+following mapping — this is what **is** guaranteed:
+
+* **Log segment writes are synchronized.** `O_DSYNC` is defined (in
+  `compat/win/dqlite_win_prelude.h`) as libuv's `UV_FS_O_DSYNC`, which
+  `uv_fs_open()` translates to `FILE_FLAG_WRITE_THROUGH`, so every segment
+  write bypasses the OS file cache. In addition, because
+  `FILE_FLAG_WRITE_THROUGH` alone does not guarantee the *device's* volatile
+  write cache is flushed (NTFS issues FUA writes, which consumer SATA drives
+  commonly ignore), the write path (`uvWriterWorkCbPortable` in
+  `src/raft/uv_writer.c`) follows every write to an `O_DSYNC`-opened file with
+  an explicit `fdatasync` — `FlushFileBuffers()` on Windows, which sends a
+  cache-flush command to the device. A write is only reported (and therefore
+  only acknowledged by raft) after that flush succeeds.
+* **Directory updates are flushed.** NTFS directories cannot be `fsync`ed the
+  POSIX way, but `UvFsSyncDir()` (`src/raft/uv_fs.c`) opens the data directory
+  with backup semantics and write access and calls `FlushFileBuffers()` on it,
+  forcing the pending NTFS metadata log records (file creates and renames) to
+  stable storage; a flush failure is propagated as an I/O error, not ignored.
+
+What is **not** guaranteed / relied upon instead:
+
+* If the data directory grants the dqlite process no write access, the
+  directory flush is skipped and dqlite relies on NTFS metadata journaling
+  alone: NTFS preserves the *ordering* of the logged create/rename operations
+  across a crash, which the rename-based segment/snapshot commit protocol
+  depends on, but the most recent metadata operations may be lost (as if they
+  had not happened yet). File *data* durability is unaffected — it comes from
+  the write-through + flush write path above.
+* Non-NTFS filesystems (FAT/exFAT, network shares) are untested and may
+  provide weaker metadata-ordering guarantees; run dqlite on NTFS.
+* The SQLite database/WAL files live in dqlite's in-memory VFS and are
+  reconstructed from the raft log, so their durability derives entirely from
+  the raft log guarantees above.
+
 Building for static linking
 ---------------------------
 
