@@ -228,15 +228,20 @@ static inline int clock_gettime(clockid_t clk_id, struct timespec *tp)
 
 /* open(2) flags with no UCRT/libuv equivalent -> defined as 0 (no-op) so the
  * flag arithmetic compiles. NOTE: this drops the semantics (O_NONBLOCK,
- * O_CLOEXEC) -- acceptable because no durability guarantee depends on them. */
+ * O_CLOEXEC) -- acceptable because no durability guarantee depends on them.
+ *
+ * O_DIRECT is deliberately NOT defined: code that probes for direct I/O does
+ * so with `#if defined(O_DIRECT)` (src/raft/uv_os.c, UvOsSetDirectIo), and
+ * leaving the macro undefined routes that probe to its honest "no direct-I/O
+ * primitive on this platform" branch (UV_ENOTSUP). An earlier iteration
+ * defined O_DIRECT as 0, which made UvOsSetDirectIo take the Linux fcntl()
+ * path and "succeed" as a no-op -- a false positive that probeDirectIO
+ * (src/raft/uv_fs.c) then had to neutralise (PORT_TODO.md W5). */
 #ifndef O_NONBLOCK
 #define O_NONBLOCK 0
 #endif
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0
-#endif
-#ifndef O_DIRECT
-#define O_DIRECT 0
 #endif
 
 /* PATH_MAX -- sized generously for path buffers. */
@@ -275,9 +280,15 @@ typedef unsigned short sa_family_t;
 #define SOCK_NONBLOCK 0
 #endif
 
-/* fcntl(2): declare the descriptor-flag commands used (O_NONBLOCK toggling) and
- * the function itself. IMPLEMENTATION deferred -- a Win32 port maps these onto
- * ioctlsocket(FIONBIO) / SetHandleInformation (worklist). */
+/* fcntl(2): declare the descriptor-flag commands and the function itself so
+ * POSIX-shaped code compiles. The Windows implementation (compat_win.c)
+ * implements NO command: it always fails with ENOSYS, because there is no
+ * Win32 per-fd equivalent of the F_GETFL/F_SETFL status flags and lying
+ * "success" bred false positives (PORT_TODO.md W5). No Windows-compiled code
+ * calls it today: the sites that use fcntl() on other platforms are compiled
+ * out here (test/lib/endpoint.c sets non-blocking mode via
+ * ioctlsocket(FIONBIO) in its _WIN32 branch, and UvOsSetDirectIo takes its
+ * no-O_DIRECT branch -- see above). */
 #ifndef F_GETFD
 #define F_GETFD 1
 #define F_SETFD 2
@@ -295,8 +306,8 @@ int fcntl(int fd, int cmd, ...);
 /* accept4(2) (Linux): accept() plus an atomic flag-set on the new socket.
  * Winsock has only accept(); wrap it and drop the flags. SOCK_CLOEXEC and
  * SOCK_NONBLOCK are shimmed to 0 (above), so no flag work is required today --
- * callers (test/lib/endpoint.c, test/raft/lib/tcp.c) set non-blocking mode
- * separately via fcntl (mapped onto ioctlsocket in the deferred socket port).
+ * the caller (test/lib/endpoint.c) sets non-blocking mode separately, via
+ * ioctlsocket(FIONBIO) in its _WIN32 branch.
  * Declared in the prelude (not <sys/socket.h>) because those callers use it
  * without including that header. The SOCKET result is narrowed to int to match
  * the POSIX fd-typed callers; INVALID_SOCKET maps to -1 so their `< 0` error

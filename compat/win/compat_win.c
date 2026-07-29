@@ -10,10 +10,8 @@
  * prelude.
  *
  * Behavioural summary:
- *  - fcntl():   no-op the descriptor-flag commands and return success. O_DIRECT
- *               is #defined to 0 on Windows (prelude), so "enabling" direct I/O
- *               is a genuine no-op -- the OS keeps buffered semantics. This
- *               preserves the intended "no real direct I/O on Windows" path.
+ *  - fcntl():   implements NO command -- always fails with ENOSYS. See the
+ *               function comment; no Windows-compiled code calls it.
  *  - statfs()/fstatfs(): report a generic, tmpfs-like filesystem so the raft
  *               direct-I/O probe (uv_fs.c) concludes "not a direct-I/O capable
  *               fs" and falls back to the portable buffered write path.
@@ -108,16 +106,22 @@ __attribute__((constructor)) static void dqliteWinQuietCrt(void)
 
 /* ------------------------------------------------------------------ fcntl */
 
+/* Honest stub: NO fcntl command is implemented, so every call fails with
+ * ENOSYS. Win32 has no per-fd equivalent of the F_GETFL/F_SETFL status flags
+ * (non-blocking mode on a socket needs ioctlsocket(FIONBIO), which the one
+ * former caller, test/lib/endpoint.c, now uses directly in its _WIN32 branch),
+ * and an earlier version that returned success for every command while doing
+ * nothing made UvOsSetDirectIo() report a direct-I/O "success" that
+ * probeDirectIO() (src/raft/uv_fs.c) had to neutralise (PORT_TODO.md W5).
+ * The definition exists only to back the prelude's declaration; if a future
+ * caller genuinely needs a command, implement THAT command's real semantics
+ * here rather than widening the success path. */
 int fcntl(int fd, int cmd, ...)
 {
 	(void)fd;
 	(void)cmd;
-	/* All descriptor-flag operations (F_GETFL/F_SETFL/F_GETFD/F_SETFD) are
-	 * no-ops on Windows: non-blocking mode is handled elsewhere in the
-	 * (deferred) socket port, and O_DIRECT is 0 so requesting direct I/O
-	 * changes nothing. Returning 0 (success) keeps callers on the correct,
-	 * buffered path. */
-	return 0;
+	errno = ENOSYS;
+	return -1;
 }
 
 /* ----------------------------------------------------------- statfs family */

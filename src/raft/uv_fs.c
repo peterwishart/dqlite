@@ -1263,18 +1263,21 @@ static int probeDirectIO(int fd, size_t *size, char *errmsg)
 	 * sets async = false and the caller selects the threadpool backend,
 	 * mirroring the __APPLE__ path above.
 	 *
-	 * This explicit early-return is deliberate: without it the Linux probe
-	 * below would compile on Windows (via the <sys/vfs.h>/fstatfs compat
-	 * shims), but UvOsSetDirectIo() returns 0 there -- because O_DIRECT is
-	 * #defined to 0 in the forced prelude, fcntl(F_SETFL, flags | 0) is a
-	 * successful no-op -- so the probe would fall through to the buffered
-	 * write() and report *size = 4096, i.e. uv->direct_io = true. That is
-	 * semantically wrong for Windows (it never does aligned direct I/O) and
-	 * only avoided breakage by coincidence: the fstatfs() TMPFS_MAGIC shim is
-	 * never even reached, and the writer stays buffered solely because
-	 * async = false. Reporting no-direct here makes the intent explicit and
-	 * robust. GetVolumeInformation()-based filesystem-type detection is
-	 * therefore unnecessary: it would only matter for deciding direct-I/O
+	 * This explicit early-return is deliberate: it states the Windows
+	 * answer ("no direct I/O, ever") directly instead of deriving it from
+	 * the probe below. The Linux probe would compile on Windows (via the
+	 * <sys/vfs.h>/fstatfs compat shims) but give the wrong kind of failure:
+	 * O_DIRECT is deliberately not defined in the forced prelude and the
+	 * compat fcntl() fails every command with ENOSYS, so UvOsSetDirectIo()
+	 * reports UV_ENOTSUP -- which the `rv != UV_EINVAL` check below would
+	 * escalate to RAFT_IOERR rather than treat as "direct I/O unavailable".
+	 * (An earlier iteration had the opposite problem: O_DIRECT was 0 and
+	 * fcntl() lied success, so the probe would have reported direct_io =
+	 * true; this early return existed to neutralise that false positive --
+	 * see PORT_TODO.md W5. It is kept because it is the semantically correct
+	 * Windows answer, not because anything still lies.)
+	 * GetVolumeInformation()-based filesystem-type detection is therefore
+	 * unnecessary: it would only matter for deciding direct-I/O
 	 * compatibility, which Windows never uses. */
 	(void)fd;
 	(void)errmsg;
