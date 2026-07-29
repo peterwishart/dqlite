@@ -745,7 +745,25 @@ item is done, not whether):
     and confirm the process degrades to a SQLite error rather than an AV/abort.
     Linux: `unit-test` 320/320 both default and `DQLITE_VFS_NO_MREMAP=1`.
 
-- [ ] **W3 — MAJOR: header shadowing is a live structural hazard.**
+- [x] **W3 — MAJOR: header shadowing is a live structural hazard.**
+      **DONE (2026-07-29), one commit (= S4).** (1) Fence: every header under
+      `compat/win/` (28 files incl. `dqlite_win_pipe.h`) now `#error`s unless
+      `_WIN32` && `DQLITE_WIN_COMPAT`; the macro is defined ONLY by
+      `dqlite_win_prelude.h`, which itself `#error`s outside `_WIN32` — so
+      only TUs force-included with the prelude (/FI, every dqlite TU) can use
+      the shims, and any other TU that resolves a generic name breaks loudly.
+      Proven with a probe TU (`-Icompat/win`, no /FI): silently compiled
+      against the pthread stub before, hard `#error` after. (2) Step 2's
+      "move off the include path" judged NOT feasible in the cheap cage —
+      dqlite's own sources hardcode `#include <unistd.h>`-style lines that
+      must keep resolving; that is S1's job (noted in the prelude comment).
+      (3) `compat/win/uv/unix.h` (the one shim shadowing a REAL vcpkg header)
+      DELETED; its only consumer `src/lib/threadpool.c:9` now guards the
+      include with `#ifndef _WIN32` (include still made on Linux — hunk is
+      guard-only, Linux preprocessed output unchanged; the only edit outside
+      `compat/win/`). PORT_WINDOWS_ERRORS.md §"shim headers" updated to match.
+      Verified: full rebuild clean; `unit-test` 319/319, `raft-uv-unit` 20/20,
+      `raft-uv-integration` 212/212, `server` 8/8, `stress` 45/45.
   - **Verified evidence.** `CMakeLists.txt:291` puts `compat/win` on the include
     path (PRIVATE, but ahead of the vcpkg dirs) for every target, and that
     directory holds generically-named headers: `pthread.h`, `semaphore.h`,
@@ -1035,7 +1053,10 @@ warnings catch substitution mistakes, then re-audit what is left of W7/W9.
       `/clang:-Wall /clang:-fno-strict-aliasing`). One line to enable, then the
       warning triage. Tracked in W4; tick both together.
 
-- [ ] **S4 — Cage the header-shadowing hazard cheaply.** Same work as **W3**
+- [x] **S4 — Cage the header-shadowing hazard cheaply.** (DONE 2026-07-29 —
+      delivered by W3's commit: `DQLITE_WIN_COMPAT` fence in all 28 compat
+      headers + prelude-only definition; the "move off the include path" half
+      deferred to S1 as W3 records.) Same work as **W3**
       steps 1–2 (`#ifdef _WIN32` + a project fence macro on every compat header;
       prefix/move the directory so generic names leave the include path).
       Do this even though S1 will later remove most of the headers — it is a few

@@ -86,9 +86,15 @@ test/raft/lib/heap.c x1); the 7th, `test_uv_writer.c`, also now compiles.
    `unistd.h`, `sys/{socket,un,mman,time,uio,vfs,syscall,file,statvfs,random}.h`,
    `netinet/{in,tcp}.h`, `arpa/inet.h`, `netdb.h`, `poll.h`, `pthread.h`,
    `semaphore.h`, `sched.h`, `libgen.h`, `dlfcn.h`, `ftw.h`, `sys/utsname.h`,
-   `dirent.h`, `linux/{magic,limits}.h`, plus a Windows-only `uv/unix.h`
-   redirect stub (a few sources hardcode `#include <uv/unix.h>`, libuv's
-   POSIX platform header, which pulls `<termios.h>`).
+   `dirent.h`, `linux/{magic,limits}.h`, plus (initially) a Windows-only
+   `uv/unix.h` redirect stub (a few sources hardcoded `#include <uv/unix.h>`,
+   libuv's POSIX platform header, which pulls `<termios.h>`). The stub was
+   later removed under W3: it shadowed a *real* vcpkg header, and its only
+   consumer (`src/lib/threadpool.c`) now guards the include with
+   `#ifndef _WIN32` instead. Every remaining shim header carries a
+   `DQLITE_WIN_COMPAT` fence (defined only by the forced-include prelude) so a
+   non-dqlite TU that resolves one of these generic names gets a hard `#error`
+   rather than silent stubs.
 2. **Forced-include prelude** (`compat/win/dqlite_win_prelude.h`, via clang-cl
    `/FI`) resolves the `IN`/`OUT` SAL cascade at its **root cause** (see §8) and
    supplies POSIX scalar types + constants universally.

@@ -30,6 +30,37 @@
 #ifndef DQLITE_WIN_PRELUDE_H
 #define DQLITE_WIN_PRELUDE_H
 
+/*
+ * This prelude is Windows-only by construction (wired in from CMakeLists.txt
+ * inside `if(WIN32)`); reaching it from a non-Windows compile means the build
+ * system is misconfigured, so fail loudly rather than emit Win32 stubs.
+ */
+#ifndef _WIN32
+#error "compat/win/dqlite_win_prelude.h is Windows-only; it must never be reached from a non-Windows build"
+#endif
+
+/*
+ * Shim fence (PORT_TODO.md W3). The compat/win directory holds POSIX shim
+ * headers under GENERIC names (<pthread.h>, <unistd.h>, <sys/mman.h>, ...)
+ * and sits on the include path AHEAD of the vcpkg/system directories. Any
+ * translation unit compiled with that include path -- including a third-party
+ * dependency TU built inside a dqlite target -- that includes one of those
+ * names would otherwise silently resolve to dqlite's declaration-only stubs,
+ * or worse, to types (e.g. pthread_mutex_t) whose layout disagrees with a
+ * real implementation: an ABI hazard the compiler cannot diagnose.
+ *
+ * DQLITE_WIN_COMPAT is the fence: it is defined HERE and only here, and this
+ * prelude is force-included (clang-cl /FI, see CMakeLists.txt) as the very
+ * first thing in every dqlite TU on Windows -- before any #include line of
+ * the TU itself can reach a shim header. Every shim header #errors when the
+ * macro is absent, so a TU compiled without dqlite's prelude that resolves
+ * one of these names gets a hard build break instead of an invisible
+ * mismatch. (The real fix -- taking the generic names off the include path
+ * entirely -- is tracked as S1; dqlite's own sources hardcode plain
+ * `#include <unistd.h>`-style lines that must keep resolving until then.)
+ */
+#define DQLITE_WIN_COMPAT 1
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif

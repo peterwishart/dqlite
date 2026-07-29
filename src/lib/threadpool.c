@@ -6,7 +6,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <uv.h>
+#ifndef _WIN32
+/* libuv's Unix-only platform header; on Windows the equivalent platform
+ * definitions come from <uv/win.h>, already pulled in by <uv.h> above. */
 #include <uv/unix.h>
+#endif
 #include "queue.h"
 #include "sm.h"
 #include "../utils.h"
