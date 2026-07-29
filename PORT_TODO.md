@@ -1010,7 +1010,27 @@ item is done, not whether):
     alignment guarantee at `raft_aligned_alloc` in `src/raft.h` and
     `src/raft/heap.c:34`.
 
-- [ ] **W8 — MINOR: a library constructor mutates host-process-global state.**
+- [x] **W8 — MINOR: a library constructor mutates host-process-global state.**
+      **DONE (2026-07-30), one commit.** Constructor REMOVED (not kept as
+      belt-and-braces). (i) CRT abort/report quieting moved to new
+      `test/lib/win.c`, compiled directly into each test executable via the
+      `dqlite_test()` WIN32 branch (deliberately NOT into the convenience
+      archive — an unreferenced constructor-only member would never be pulled
+      in, the exact link-order-luck failure being removed). (ii) Winsock init
+      made structural: `dqliteWinSocketsInit()` (INIT_ONCE one-shot
+      WSAStartup 2.2, no WSACleanup — teardown reclaims it and cleanup tied
+      to object counts could yank Winsock from under libuv/host) called from
+      `dqlite_node_create` + `dqlite_server_create`, through which every
+      socket-using library path is reachable (audited include/dqlite.h — no
+      other public function touches sockets first). Probe-verified: consumer
+      binary w/o dqlite call → `getaddrinfo` fails WSANOTINITIALISED (hidden
+      init gone); after create → works; abort() in a consumer runs WER again
+      (flags identical to dqlite-free baseline) while a harness-style binary
+      aborts silently, exit 3, <100ms. Verified: rebuild 0 warnings; unit
+      321/321, raft-uv-unit 20/20, raft-uv-integration 212/212, raft-core-unit
+      262/262, raft-core-integration 191/191, fuzzy 57/57, stress 46/46,
+      server 8/8, cluster 23/23, membership 5/5, client 6/6. Linux hunks all
+      guarded (gcc -E -P token streams identical for src/server.c).
   - **Verified evidence.** `compat/win/compat_win.c:65-82`:
     `__attribute__((constructor)) dqliteWinQuietCrt()` calls
     `_set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT)`, which
