@@ -1,0 +1,166 @@
+/*
+ * dqlite Windows port -- local ("@name") transport over Win32 named pipes.
+ *
+ * dqlite's local (non-TCP) transport uses the Linux ABSTRACT-namespace AF_UNIX
+ * convention: an address of the form "@name" (leading '@', kernel-global name,
+ * no filesystem entry). Windows <afunix.h> AF_UNIX cannot bind the abstract
+ * namespace, so on Windows the "@name" family is carried over a libuv named
+ * pipe (uv_pipe_t == "\\.\pipe\..."), which is the idiomatic Win32 local-IPC
+ * primitive and the closest analogue to a kernel-global abstract socket.
+ *
+ * This header defines the single, deterministic mapping from a dqlite "@name"
+ * address to its named-pipe path, shared by BOTH ends so listener and connector
+ * agree byte-for-byte:
+ *
+ *     "@name"  ->  "\\.\pipe\dqlite-<name>"
+ *
+ * The mapping is a pure function of <name> (no PID/entropy), exactly mirroring
+ * the Linux abstract namespace where "@name" is a global rendezvous point: any
+ * process that knows the advertised address can connect. (This inherits the
+ * same cross-process name-collision semantics as the Linux abstract namespace.)
+ *
+ * This file lives in compat/win/, which is on the include path on Windows ONLY
+ * (see CMakeLists.txt); it is never visible to the Linux/macOS build.
+ */
+#ifndef DQLITE_WIN_PIPE_H
+#define DQLITE_WIN_PIPE_H
+
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+
+#ifndef _INC_WINDOWS
+#include <windows.h> /* CreateFile, ReadFile, WriteFile, OVERLAPPED, ... */
+#endif
+
+/* Pipe-name prefix. A named pipe path component cannot contain a backslash. */
+#define DQLITE_WIN_PIPE_PREFIX "\\\\.\\pipe\\dqlite-"
+
+/* Build the named-pipe path for a dqlite "@name" address into `out`.
+ *
+ * `at_address` is the dqlite address; a leading '@' (if present) is stripped.
+ * The <name> is sanitized so it is a legal pipe-path component: the characters
+ * that a pipe name may not contain ('\\', '/', ':') are folded to '_'. In the
+ * dqlite tests <name> is a small integer ("@1", "@123"), so sanitization is
+ * belt-and-suspenders. `out_len` should be at least 256. */
+static inline void DqliteWinPipeName(const char *at_address,
+				     char *out,
+				     size_t out_len)
+{
+	const char *name = (at_address[0] == '@') ? at_address + 1 : at_address;
+	char sanitized[128];
+	size_t i;
+
+	for (i = 0; name[i] != '\0' && i + 1 < sizeof(sanitized); i++) {
+		char c = name[i];
+		if (c == '\\' || c == '/' || c == ':') {
+			c = '_';
+		}
+		sanitized[i] = c;
+	}
+	sanitized[i] = '\0';
+
+	_snprintf(out, out_len, "%s%s", DQLITE_WIN_PIPE_PREFIX, sanitized);
+	out[out_len - 1] = '\0';
+}
+
+/*
+ * Overlapped synchronous I/O for the local-transport pipe.
+ *
+ * The connect side opens the pipe with FILE_FLAG_OVERLAPPED so that, once the
+ * descriptor is handed to libuv (uv_pipe_open, raft transport), libuv drives it
+ * with IOCP rather than the UV_HANDLE_NON_OVERLAPPED_PIPE fallback -- which
+ * burns one libuv threadpool worker per pipe read and DEADLOCKS a multi-node
+ * cluster (N*(N-1) connections) once the default 4-worker pool is exhausted.
+ *
+ * Because the handle is overlapped, plain synchronous WriteFile/ReadFile with a
+ * NULL OVERLAPPED are invalid (Win32 requires a non-NULL OVERLAPPED for such
+ * handles). The synchronous handshake writes (src/transport.c) and the blocking
+ * client I/O (src/client/protocol.c) therefore go through these helpers, which
+ * drive one overlapped operation to completion using a private event. They run
+ * BEFORE (handshake) or entirely OUTSIDE (client) libuv's ownership, so using a
+ * private event does not conflict with libuv's IOCP.
+ */
+
+/* Write exactly `len` bytes. Returns bytes written, or -1 on error. Blocks to
+ * completion (transport handshake and client requests are small). */
+static inline int DqliteWinPipeWriteAll(HANDLE h, const void *buf, size_t len)
+{
+	size_t total = 0;
+	OVERLAPPED ov;
+	DWORD done;
+	BOOL ok;
+
+	while (total < len) {
+		memset(&ov, 0, sizeof ov);
+		ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+		if (ov.hEvent == NULL) {
+			return -1;
+		}
+		ok = WriteFile(h, (const char *)buf + total,
+			       (DWORD)(len - total), NULL, &ov);
+		if (!ok && GetLastError() == ERROR_IO_PENDING) {
+			WaitForSingleObject(ov.hEvent, INFINITE);
+			ok = GetOverlappedResult(h, &ov, &done, FALSE);
+		} else if (ok) {
+			ok = GetOverlappedResult(h, &ov, &done, FALSE);
+		}
+		CloseHandle(ov.hEvent);
+		if (!ok) {
+			return -1;
+		}
+		if (done == 0) {
+			break;
+		}
+		total += done;
+	}
+	return (int)total;
+}
+
+/* Read up to `len` bytes with a millisecond timeout (`timeout_ms < 0` == wait
+ * forever). Returns bytes read (>0), 0 on EOF or timeout, -1 on error. */
+static inline int DqliteWinPipeReadTimed(HANDLE h,
+					 void *buf,
+					 size_t len,
+					 long long timeout_ms)
+{
+	OVERLAPPED ov;
+	DWORD done = 0;
+	DWORD wms;
+	BOOL ok;
+
+	memset(&ov, 0, sizeof ov);
+	ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+	if (ov.hEvent == NULL) {
+		return -1;
+	}
+	ok = ReadFile(h, buf, (DWORD)len, NULL, &ov);
+	if (!ok && GetLastError() == ERROR_IO_PENDING) {
+		wms = (timeout_ms < 0)
+			  ? INFINITE
+			  : ((timeout_ms > 0x7fffffff) ? 0x7fffffff
+						       : (DWORD)timeout_ms);
+		if (WaitForSingleObject(ov.hEvent, wms) == WAIT_TIMEOUT) {
+			CancelIoEx(h, &ov);
+			/* Wait for the cancellation to settle before the
+			 * OVERLAPPED/buffer go out of scope. */
+			GetOverlappedResult(h, &ov, &done, TRUE);
+			CloseHandle(ov.hEvent);
+			return 0; /* timeout */
+		}
+		ok = GetOverlappedResult(h, &ov, &done, FALSE);
+	} else if (ok) {
+		ok = GetOverlappedResult(h, &ov, &done, FALSE);
+	}
+	CloseHandle(ov.hEvent);
+	if (!ok) {
+		DWORD err = GetLastError();
+		if (err == ERROR_BROKEN_PIPE || err == ERROR_HANDLE_EOF) {
+			return 0; /* EOF */
+		}
+		return -1;
+	}
+	return (int)done;
+}
+
+#endif /* DQLITE_WIN_PIPE_H */

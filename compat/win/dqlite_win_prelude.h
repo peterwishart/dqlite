@@ -1,0 +1,460 @@
+/*
+ * dqlite Windows port -- forced-include prelude (POSIX-compat shim layer).
+ *
+ * This header is force-included (clang-cl /FI) into every translation unit on
+ * Windows ONLY. It is wired in from CMakeLists.txt inside the `if(WIN32)`
+ * branch and lives in compat/win/, a directory that is added to the include
+ * path exclusively on Windows -- it is never on the Linux/macOS include path
+ * and must never shadow the real system headers there.
+ *
+ * Responsibilities:
+ *
+ *  1. Resolve the winuser.h `IN`/`OUT` SAL-annotation cascade.
+ *     dqlite's src/utils.h defines a *function-like* macro `IN(E, ...)`
+ *     (pulled into most TUs via src/tracing.h). When that macro is seen before
+ *     <windows.h>, the SDK's own `#ifndef IN / #define IN` (empty) guard in
+ *     minwindef.h is skipped, so winuser.h prototypes such as
+ *     `RegisterPowerSettingNotification(IN HANDLE h, ...)` are parsed with a
+ *     bare, undefined `IN` token -> "unknown type name 'IN'" (~1000 errors).
+ *
+ *     Fix: pull in the Winsock/Windows SDK headers HERE, first, so every SAL
+ *     annotation (`IN`, `OUT`, `OPTIONAL`, ...) resolves to the SDK's empty
+ *     macros while those headers are parsed. Then `#undef IN` so that when
+ *     utils.h is later included it can define its own function-like `IN()`
+ *     without colliding. Because the SDK headers use include guards, the later
+ *     includes via <uv.h> (uv/win.h) are no-ops and never re-parse a bare `IN`.
+ *
+ *  2. Provide the POSIX scalar types (ssize_t, mode_t) universally, so code
+ *     that uses them without including <unistd.h> still compiles.
+ */
+#ifndef DQLITE_WIN_PRELUDE_H
+#define DQLITE_WIN_PRELUDE_H
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+/*
+ * Winsock2 must precede <windows.h>. Include the same SDK headers that
+ * libuv's uv/win.h pulls in (winsock2 -> mswsock -> ws2tcpip -> windows), so
+ * that they are all fully parsed -- with IN/OUT defined as the SDK's empty
+ * annotation macros -- and guarded before any dqlite header can define IN.
+ */
+#include <winsock2.h>
+#include <mswsock.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+
+/*
+ * Hand the `IN` identifier back to dqlite. Every SDK header that uses IN/OUT
+ * as a parameter annotation has already been parsed above; OUT is left as the
+ * SDK's empty macro (dqlite never defines OUT), only IN needs releasing so
+ * utils.h can install its function-like IN(E, ...) form.
+ */
+#undef IN
+
+/* ---- POSIX scalar types absent from MSVC/UCRT ---------------------------- */
+#include <BaseTsd.h> /* SSIZE_T */
+
+#if !defined(_SSIZE_T_) && !defined(_SSIZE_T_DEFINED)
+typedef SSIZE_T ssize_t;
+#define _SSIZE_T_
+#define _SSIZE_T_DEFINED
+#endif
+
+/*
+ * off_t: MSVC/UCRT's <sys/types.h> defines off_t as a 32-bit `long`, but dqlite
+ * (like POSIX/Linux) assumes a 64-bit off_t. The width difference is not merely
+ * a large-file concern: in dqlite_server_start the guard
+ * `full_size > (off_t)SSIZE_MAX` casts the 64-bit SSIZE_MAX (== INTPTR_MAX)
+ * down to a 32-bit off_t, which truncates to -1, so the comparison is TRUE for
+ * *any* file size (even 0) and dqlite_server_start spuriously returns
+ * DQLITE_ERROR. Predefine the UCRT guard and provide a 64-bit off_t so all TUs
+ * agree with the POSIX type. `_off_t` is kept as `long` to match the CRT's own
+ * `struct stat`/`_lseek` layout. This header is on the include path on Windows
+ * only, so the POSIX/Linux build is unaffected.
+ */
+#ifndef _OFF_T_DEFINED
+#define _OFF_T_DEFINED
+typedef long _off_t;
+typedef __int64 off_t;
+#endif
+
+#ifndef DQLITE_MODE_T_DEFINED
+#define DQLITE_MODE_T_DEFINED
+typedef unsigned short mode_t;
+#endif
+
+#ifndef DQLITE_PID_T_DEFINED
+#define DQLITE_PID_T_DEFINED
+typedef int pid_t;
+#endif
+
+/* ---- POSIX libc gap-fillers (absent from UCRT) --------------------------- */
+/* Provided in the prelude so every TU has them regardless of which POSIX
+ * header it happened to include. All are static inline (no link surface). */
+#include <stdlib.h>
+#include <string.h>
+#include <time.h> /* struct timespec (C11) */
+
+/* strndup: bounded string duplicate. */
+static inline char *strndup(const char *s, size_t n)
+{
+	size_t len = 0;
+	char *copy;
+	while (len < n && s[len] != '\0') {
+		len++;
+	}
+	copy = (char *)malloc(len + 1);
+	if (copy == NULL) {
+		return NULL;
+	}
+	memcpy(copy, s, len);
+	copy[len] = '\0';
+	return copy;
+}
+
+/* clock_gettime: CLOCK_REALTIME via the system clock, CLOCK_MONOTONIC via the
+ * performance counter. Enough for dqlite's timing/tracing needs. */
+#ifndef DQLITE_CLOCKID_T_DEFINED
+#define DQLITE_CLOCKID_T_DEFINED
+typedef int clockid_t;
+#endif
+#ifndef CLOCK_REALTIME
+#define CLOCK_REALTIME 0
+#endif
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
+
+static inline int clock_gettime(clockid_t clk_id, struct timespec *tp)
+{
+	if (tp == NULL) {
+		return -1;
+	}
+	if (clk_id == CLOCK_MONOTONIC) {
+		LARGE_INTEGER freq, ctr;
+		QueryPerformanceFrequency(&freq);
+		QueryPerformanceCounter(&ctr);
+		tp->tv_sec = (time_t)(ctr.QuadPart / freq.QuadPart);
+		tp->tv_nsec = (long)(((ctr.QuadPart % freq.QuadPart) *
+				      1000000000ULL) /
+				     (unsigned long long)freq.QuadPart);
+		return 0;
+	} else {
+		FILETIME ft;
+		unsigned long long t;
+		GetSystemTimePreciseAsFileTime(&ft);
+		t = ((unsigned long long)ft.dwHighDateTime << 32) |
+		    ft.dwLowDateTime;
+		t -= 116444736000000000ULL; /* 1601 -> 1970 */
+		tp->tv_sec = (time_t)(t / 10000000ULL);
+		tp->tv_nsec = (long)((t % 10000000ULL) * 100ULL);
+		return 0;
+	}
+}
+
+/* ---- POSIX constants absent from UCRT ------------------------------------ */
+/* File-mode permission bits (POSIX <sys/stat.h>). Windows only honours the
+ * owner read/write bits; group/other are accepted and ignored. Values are the
+ * standard octal constants so bitwise combinations compile as expected. */
+#ifndef S_IRUSR
+#define S_IRUSR 0400
+#define S_IWUSR 0200
+#define S_IXUSR 0100
+#define S_IRWXU 0700
+#define S_IRGRP 0040
+#define S_IWGRP 0020
+#define S_IXGRP 0010
+#define S_IRWXG 0070
+#define S_IROTH 0004
+#define S_IWOTH 0002
+#define S_IXOTH 0001
+#define S_IRWXO 0007
+#endif
+
+/* open(2) flags with no UCRT equivalent -> defined as 0 (no-op) so the flag
+ * arithmetic compiles. NOTE: this drops the semantics (O_DSYNC durability,
+ * O_NONBLOCK, O_CLOEXEC) -- a real Win32 port must restore them (worklist). */
+#ifndef O_DSYNC
+#define O_DSYNC 0
+#endif
+#ifndef O_NONBLOCK
+#define O_NONBLOCK 0
+#endif
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+#ifndef O_DIRECT
+#define O_DIRECT 0
+#endif
+
+/* PATH_MAX -- sized generously for path buffers. */
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+#ifndef NAME_MAX
+#define NAME_MAX 255
+#endif
+
+/* SIGPIPE has no meaning on Windows (no broken-pipe signal); define it so
+ * signal(SIGPIPE, SIG_IGN) style code compiles. */
+#ifndef SIGPIPE
+#define SIGPIPE 13
+#endif
+
+/* ssize_t upper bound (libuv normally defines this alongside its own ssize_t
+ * typedef, which we suppress via _SSIZE_T_DEFINED above, so define it here). */
+#ifndef SSIZE_MAX
+#include <stdint.h>
+#define SSIZE_MAX INTPTR_MAX
+#endif
+
+/* sa_family_t: Winsock spells the address family as ADDRESS_FAMILY / u_short
+ * and does not provide the POSIX name. */
+#ifndef DQLITE_SA_FAMILY_T_DEFINED
+#define DQLITE_SA_FAMILY_T_DEFINED
+typedef unsigned short sa_family_t;
+#endif
+
+/* Linux socket-type flags (OR'd into the socket()/accept4() type). */
+#ifndef SOCK_CLOEXEC
+#define SOCK_CLOEXEC 0
+#endif
+#ifndef SOCK_NONBLOCK
+#define SOCK_NONBLOCK 0
+#endif
+
+/* fcntl(2): declare the descriptor-flag commands used (O_NONBLOCK toggling) and
+ * the function itself. IMPLEMENTATION deferred -- a Win32 port maps these onto
+ * ioctlsocket(FIONBIO) / SetHandleInformation (worklist). */
+#ifndef F_GETFD
+#define F_GETFD 1
+#define F_SETFD 2
+#define F_GETFL 3
+#define F_SETFL 4
+#endif
+#ifndef FD_CLOEXEC
+#define FD_CLOEXEC 1
+#endif
+#ifndef O_DIRECTORY
+#define O_DIRECTORY 0
+#endif
+int fcntl(int fd, int cmd, ...);
+
+/* accept4(2) (Linux): accept() plus an atomic flag-set on the new socket.
+ * Winsock has only accept(); wrap it and drop the flags. SOCK_CLOEXEC and
+ * SOCK_NONBLOCK are shimmed to 0 (above), so no flag work is required today --
+ * callers (test/lib/endpoint.c, test/raft/lib/tcp.c) set non-blocking mode
+ * separately via fcntl (mapped onto ioctlsocket in the deferred socket port).
+ * Declared in the prelude (not <sys/socket.h>) because those callers use it
+ * without including that header. The SOCKET result is narrowed to int to match
+ * the POSIX fd-typed callers; INVALID_SOCKET maps to -1 so their `< 0` error
+ * checks still work. Full SOCKET/fd plumbing is part of the deferred socket
+ * reimplementation. */
+static inline int accept4(int fd,
+			  struct sockaddr *addr,
+			  socklen_t *addrlen,
+			  int flags)
+{
+	SOCKET s = accept((SOCKET)fd, addr, addrlen);
+	(void)flags;
+	return s == INVALID_SOCKET ? -1 : (int)s;
+}
+
+/* ---- aligned_alloc (C11) -> malloc --------------------------------------
+ * UCRT has no C11 aligned_alloc(). The obvious candidate, _aligned_malloc(),
+ * returns memory that MUST be freed with _aligned_free() and NOT plain free() --
+ * but C11 guarantees aligned_alloc() memory is freeable with free(), and the
+ * raft/dqlite code (and its tests) rely on that (e.g. raft_aligned_alloc()
+ * followed by raft_free()). Honouring _aligned_malloc's free() restriction
+ * across every call site is infeasible and heap-corrupting when missed.
+ *
+ * dqlite only requests alignment for O_DIRECT I/O, which is disabled on Windows
+ * (buffered writes via the portable backend), so the alignment is not needed
+ * for correctness here. We therefore map aligned_alloc() to plain malloc():
+ * the free()/aligned-free contract holds and no heap bookkeeping mismatch is
+ * possible. (The one test that asserts the returned alignment is skipped on
+ * Windows.) Alignment argument is intentionally ignored.
+ *
+ * Provided as a static inline function, NOT a function-like macro, so the raft
+ * heap vtable member call `currentHeap->aligned_alloc(...)` is not mis-parsed. */
+static inline void *aligned_alloc(size_t alignment, size_t size)
+{
+	(void)alignment;
+	return malloc(size);
+}
+
+/* bcmp: legacy alias for memcmp. */
+#ifndef bcmp
+#define bcmp(a, b, n) memcmp((a), (b), (n))
+#endif
+
+/* MIN/MAX: some sources expect the sys/param.h spellings. */
+#ifndef MIN
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#endif
+#ifndef MAX
+#define MAX(a, b) (((a) > (b)) ? (a) : (b))
+#endif
+
+/* ---- Endianness (POSIX <endian.h> / BSD <machine/endian.h>) --------------
+ * src/raft/byte.c bundles a public-domain SHA1 that needs BYTE_ORDER together
+ * with LITTLE_ENDIAN/BIG_ENDIAN to select its blk0() byte-swap. Its built-in
+ * fallback only recognises legacy arch macros (__i386__, MIPSEL, ...) and so
+ * never matches clang-cl on x64 -> BYTE_ORDER is left undefined -> #error
+ * "Undefined or invalid BYTE_ORDER" (and the follow-on undeclared blk0).
+ * Every Windows target dqlite supports (x64, arm64) is little-endian, so
+ * define the macros here -- force-included first, before byte.c's own
+ * `#ifndef BYTE_ORDER` block, which is then skipped with the values in scope.
+ * Values match byte.c's own so any cross-file comparison stays consistent. */
+#ifndef LITTLE_ENDIAN
+#define LITTLE_ENDIAN 1234
+#endif
+#ifndef BIG_ENDIAN
+#define BIG_ENDIAN 4321
+#endif
+#ifndef PDP_ENDIAN
+#define PDP_ENDIAN 3412
+#endif
+#ifndef BYTE_ORDER
+#define BYTE_ORDER LITTLE_ENDIAN
+#endif
+
+/* ---- qsort_r (GNU/BSD reentrant qsort) -----------------------------------
+ * UCRT has qsort_s, but its comparator takes the context argument FIRST,
+ * whereas the GNU qsort_r that src/roles.c expects takes it LAST:
+ *   glibc:  int cmp(const void *a, const void *b, void *arg)
+ *   UCRT:   int cmp(void *ctx, const void *a, const void *b)
+ * Provide the glibc-signature qsort_r as a thin adapter over qsort_s. The
+ * context is threaded through qsort_s (never a global), so this stays
+ * reentrant/thread-safe. roles.c's comparators use the glibc (arg-last)
+ * order, matching this wrapper. */
+struct dqlite_qsort_r_ctx {
+	int (*compar)(const void *, const void *, void *);
+	void *arg;
+};
+static inline int dqlite_qsort_r_trampoline(void *ctx,
+					    const void *a,
+					    const void *b)
+{
+	struct dqlite_qsort_r_ctx *c = (struct dqlite_qsort_r_ctx *)ctx;
+	return c->compar(a, b, c->arg);
+}
+static inline void qsort_r(void *base,
+			   size_t nmemb,
+			   size_t size,
+			   int (*compar)(const void *, const void *, void *),
+			   void *arg)
+{
+	struct dqlite_qsort_r_ctx c;
+	c.compar = compar;
+	c.arg = arg;
+	qsort_s(base, nmemb, size, dqlite_qsort_r_trampoline, &c);
+}
+
+/* strtok_r -> UCRT strtok_s (identical 3-argument signature/semantics). */
+#ifndef strtok_r
+#define strtok_r(str, delim, saveptr) strtok_s((str), (delim), (saveptr))
+#endif
+
+/* strverscmp (GNU): version-aware string compare. Only used by
+ * test/raft/unit/test_uv_fs.c to compare kernel-release strings. This is a
+ * compact implementation sufficient for dotted numeric version strings (it
+ * compares digit runs by magnitude): it is NOT a byte-exact clone of glibc's
+ * leading-zero/fraction handling, which those version strings never exercise. */
+#include <ctype.h>
+static inline int strverscmp(const char *s1, const char *s2)
+{
+	const unsigned char *a = (const unsigned char *)s1;
+	const unsigned char *b = (const unsigned char *)s2;
+	while (*a != '\0' && *a == *b) {
+		a++;
+		b++;
+	}
+	if (isdigit(*a) && isdigit(*b)) {
+		const unsigned char *ea = a;
+		const unsigned char *eb = b;
+		while (isdigit(*ea)) {
+			ea++;
+		}
+		while (isdigit(*eb)) {
+			eb++;
+		}
+		/* Longer digit run (no leading zeros) => larger number. */
+		if ((ea - a) != (eb - b)) {
+			return (int)((ea - a) - (eb - b));
+		}
+	}
+	return (int)*a - (int)*b;
+}
+
+/* ---- posix_fadvise: advisory, safe no-op --------------------------------
+ * src/raft/uv_fs.c hints sequential access. Windows has no equivalent syscall
+ * (the hint would be given as FILE_FLAG_SEQUENTIAL_SCAN at CreateFile time, a
+ * later port item); dropping the hint is always safe and returns success. */
+#ifndef POSIX_FADV_NORMAL
+#define POSIX_FADV_NORMAL 0
+#define POSIX_FADV_RANDOM 1
+#define POSIX_FADV_SEQUENTIAL 2
+#define POSIX_FADV_WILLNEED 3
+#define POSIX_FADV_DONTNEED 4
+#define POSIX_FADV_NOREUSE 5
+#endif
+static inline int posix_fadvise(int fd, long long offset, long long len, int advice)
+{
+	(void)fd;
+	(void)offset;
+	(void)len;
+	(void)advice;
+	return 0;
+}
+
+/* ---- posix_fallocate: implemented via _chsize_s -------------------------
+ * Ensure the file backing `fd` has at least offset+len bytes. _chsize_s grows
+ * the file (zero-filled) to the requested size; we only ever grow (never
+ * truncate) by taking max(current, offset+len). POSIX contract: return 0 on
+ * success or a positive errno-style code on failure, and do NOT set errno --
+ * _chsize_s already returns exactly such a code. */
+#include <errno.h>
+#include <io.h>    /* _chsize_s, _lseeki64 */
+#include <stdio.h> /* SEEK_END */
+static inline int posix_fallocate(int fd, long long offset, long long len)
+{
+	long long want = offset + len;
+	long long cur = _lseeki64(fd, 0, SEEK_END);
+	if (cur < 0) {
+		return errno;
+	}
+	if (want <= cur) {
+		return 0;
+	}
+	return _chsize_s(fd, want);
+}
+
+/* ---- __assert_fail (glibc) -----------------------------------------------
+ * The test runner (test/lib/runner.h) and src/lib/assert.c call __assert_fail
+ * directly with glibc's 4-argument signature. UCRT provides _wassert instead
+ * and has no __assert_fail symbol, so supply one. static inline keeps it off
+ * the link surface and, crucially, avoids -Wunused-function (-> -Werror) in
+ * the many TUs force-included by this prelude that never reference it. */
+#include <stdlib.h> /* abort */
+static inline
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((noreturn))
+#endif
+    void
+    __assert_fail(const char *assertion,
+		  const char *file,
+		  unsigned int line,
+		  const char *function)
+{
+	fprintf(stderr, "%s:%u: %s: Assertion `%s' failed.\n", file, line,
+		function != NULL ? function : "", assertion);
+	abort();
+}
+
+#endif /* DQLITE_WIN_PRELUDE_H */
