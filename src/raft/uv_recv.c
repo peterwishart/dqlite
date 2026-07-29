@@ -251,6 +251,7 @@ static void uvServerReadCb(uv_stream_t *stream,
 			/* If the payload buffer is not set, it means we just
 			 * completed reading the message header. */
 			uint64_t type;
+			size_t payload_len;
 
 			dqlite_assert(s->header.base != NULL);
 
@@ -267,7 +268,7 @@ static void uvServerReadCb(uv_stream_t *stream,
 			 * encoding the version in some of the remaining bytes
 			 * of s->preamble[0]. */
 			rv = uvDecodeMessage((uint16_t)type, &s->header,
-					     &s->message, &s->payload.len);
+					     &s->message, &payload_len);
 			if (rv != 0) {
 				tracef("decode message: %s",
 				       errCodeToString(rv));
@@ -278,17 +279,22 @@ static void uvServerReadCb(uv_stream_t *stream,
 			s->message.server_address = s->address;
 
 			/* If the message has no payload, we're done. */
-			if (s->payload.len == 0) {
+			if (payload_len == 0) {
 				uvFireRecvCb(s);
-			} else if (s->payload.len > MAX_PAYLOAD_LEN) {
+			} else if (payload_len > MAX_PAYLOAD_LEN) {
 				tracef("message payload too long: %" PRIu64 " bytes",
-				       (uint64_t)s->payload.len);
+				       (uint64_t)payload_len);
 				if (s->message.type == RAFT_IO_APPEND_ENTRIES) {
 					raft_free(s->message.append_entries.entries);
 					s->message.append_entries.entries = NULL;
 					s->message.append_entries.n_entries = 0;
 				}
 				goto abort;
+			} else {
+				/* uv_buf_t.len is only 32 bits wide on
+				 * Windows; the bound check above guarantees
+				 * this assignment doesn't truncate. */
+				s->payload.len = payload_len;
 			}
 		} else {
 			/* If we get here it means that we've just completed
