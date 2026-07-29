@@ -87,9 +87,11 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done
       (2026-07-27), `server` 4/8→8/8.** Two more REAL Windows bugs in the server
       persistence path: (i) 32-bit `off_t` truncation — MSVC `off_t` is 32-bit
       `long`, so `(off_t)SSIZE_MAX` truncated to `-1` and `full_size >
-      (off_t)SSIZE_MAX` was true for ANY file → instant `DQLITE_ERROR`; fixed by
-      widening `off_t`→`__int64` in the Windows-only prelude (keeps `_off_t` as
-      `long` for CRT stat/lseek layout). (ii) rename-over-open-file — Windows
+      (off_t)SSIZE_MAX` was true for ANY file → instant `DQLITE_ERROR`; first
+      fixed by widening `off_t`→`__int64` in the Windows-only prelude, later
+      (W5, 2026-07-29) re-fixed at the root — the `server.c` comparison now
+      casts up to `int64_t` and the prelude uses UCRT's own 32-bit `off_t`.
+      (ii) rename-over-open-file — Windows
       can't `rename()` over a file with open handles (POSIX `renameat` can);
       fixed with `serverDirOpen`→`CreateFileA(FILE_SHARE_DELETE)`+`_open_osfhandle`
       (`_O_BINARY` keeps on-disk `\n` layout == Linux) and `serverDirRename`→
@@ -478,8 +480,10 @@ equivalent exists; this is the largest task.
       layer. (2026-07-28)
 - [x] Large-file support — CONFIRMED already handled: `CMakeLists.txt` Linux
       branch defines `_FILE_OFFSET_BITS=64` (== `AC_SYS_LARGEFILE`), so `off_t`
-      is 64-bit and matches libuv's `int64_t` fs offsets; Windows widened
-      `off_t`→`__int64` in the prelude. No change needed.
+      is 64-bit and matches libuv's `int64_t` fs offsets; Windows keeps UCRT's
+      32-bit `off_t` (since W5) — every compat entry point taking an
+      offset/length is declared `long long`, and no dqlite `off_t` value can
+      exceed 2 GiB by construction. No change needed.
 - [x] `DQLITE_PACKED` audit — CONFIRMED no-op: `src/utils.h` gates it on
       `__has_attribute(packed)`, which clang-cl 19 (the Windows toolchain)
       supports; a `#pragma pack` fallback would only matter for a pure-MSVC
@@ -839,7 +843,31 @@ item is done, not whether):
     re-run `raft-uv-integration` (212/212), `unit-test`, `stress`. Linux
     untouched (the branch is WIN32/clang-cl-only).
 
-- [ ] **W5 — MAJOR: CRT guard-macro hijacks.**
+- [x] **W5 — MAJOR: CRT guard-macro hijacks.**
+      **DONE (2026-07-29), three commits.** (1) Root cause, unguarded +
+      upstreamable: both `src/server.c` comparisons now
+      `(int64_t)full_size > (int64_t)SSIZE_MAX` — casting the limit *down*
+      truncated on any platform with `off_t` narrower than `ssize_t`; Linux
+      value-identical (`off_t` already 64-bit under `_FILE_OFFSET_BITS=64`).
+      (2) `_OFF_T_DEFINED` hijack DELETED — prelude now `#include
+      <sys/types.h>` (UCRT's own 32-bit `off_t`); audit found no remaining
+      64-bit-through-off_t site (compat entry points all declare `long long`:
+      mmap/ftruncate/pread/pwrite/posix_fallocate; UCRT `lseek` returns
+      `long`; raft metadata/segment + vfs shm sizes ≪2 GiB by construction),
+      so no dqlite-owned typedef remains and the fallback `_Static_assert`s
+      are moot. (3) `fcntl()` honest: caller enumeration found the needed
+      command set EMPTY on Windows (endpoint.c's call is `#else`-guarded and
+      its `_WIN32` branch uses `ioctlsocket(FIONBIO)`; `UvOsSetDirectIo` only
+      reached fcntl because the prelude defined `O_DIRECT 0` — that define is
+      deleted, routing it to its existing honest `UV_ENOTSUP` branch with NO
+      edit to uv_os.c) → fcntl now fails every command `-1`/`ENOSYS`. The
+      `probeDirectIO` `_WIN32` early return is kept — it IS the correct
+      Windows answer (and the ENOSYS failure would otherwise escalate to
+      RAFT_IOERR via the `rv != UV_EINVAL` check) — but no longer masks a
+      lie; stale "IMPLEMENTATION deferred" fcntl/accept4 comments rewritten.
+      Verified: rebuild 0 warnings; `unit-test` 319/319, `raft-uv-unit`
+      20/20, `raft-uv-integration` 212/212, `server` 8/8 (the suite that
+      regressed originally), `stress` 45/45, `cluster` 23/23.
   - **Verified evidence.** `compat/win/dqlite_win_prelude.h:80-83` pre-defines
     the UCRT-internal guard `_OFF_T_DEFINED` and supplies
     `typedef __int64 off_t` (keeping `_off_t` as `long`). It fixes a real bug —
