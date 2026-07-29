@@ -348,3 +348,44 @@ TEST_CASE(adjust, standby_weights_vs_failure_domains, NULL)
 	AFTER(4, DQLITE_STANDBY);
 	return MUNIT_OK;
 }
+
+/* Fully-equivalent promotion candidates (same failure-domain count, weight,
+ * role and online state) are chosen in ascending node-id order. This pins the
+ * final id tie-break in compareNodesForPromotion: without it the outcome for
+ * equal candidates depends on how the platform's sort handles equal elements
+ * (glibc's qsort_r is a stable merge sort and preserves the ascending-id input
+ * order; MSVC's qsort_s is not stable), so this test must pass unchanged on
+ * every platform. */
+TEST_CASE(adjust, promote_voter_tie_break, NULL)
+{
+	(void)params;
+	TARGET(VOTERS(3), STANDBYS(1));
+	BEFORE(1, DQLITE_VOTER, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	BEFORE(2, DQLITE_STANDBY, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	BEFORE(3, DQLITE_STANDBY, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	BEFORE(4, DQLITE_STANDBY, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	COMPUTE(1);
+	AFTER(1, DQLITE_VOTER);
+	AFTER(2, DQLITE_VOTER);
+	AFTER(3, DQLITE_VOTER);
+	AFTER(4, DQLITE_STANDBY);
+	return MUNIT_OK;
+}
+
+/* Same as promote_voter_tie_break, but for the standby-promotion pass: among
+ * fully-equivalent spares the ones with the lowest ids become standbys. */
+TEST_CASE(adjust, promote_standby_tie_break, NULL)
+{
+	(void)params;
+	TARGET(VOTERS(1), STANDBYS(2));
+	BEFORE(1, DQLITE_VOTER, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	BEFORE(2, DQLITE_SPARE, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	BEFORE(3, DQLITE_SPARE, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	BEFORE(4, DQLITE_SPARE, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	COMPUTE(1);
+	AFTER(1, DQLITE_VOTER);
+	AFTER(2, DQLITE_STANDBY);
+	AFTER(3, DQLITE_STANDBY);
+	AFTER(4, DQLITE_SPARE);
+	return MUNIT_OK;
+}
