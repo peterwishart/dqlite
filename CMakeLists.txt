@@ -1,16 +1,39 @@
 # ---------------------------------------------------------------------------
-# dqlite — cross-platform CMake build (sketch)
+# dqlite — cross-platform CMake build
 #
-# Status: Linux is fully wired up and builds/tests today. macOS and Windows
-# branches are stubbed with explicit TODOs marking the platform work required
-# (dqlite's raft I/O backend is currently Linux-only: kernel AIO / io_uring /
-# eventfd / statfs). Structured this way so the file is upstreamable: a single
-# build description that grows a real backend per platform rather than a fork.
+# What each platform branch does today:
+#
+#   Linux — fully wired; the reference build. Deps via pkg-config (libuv,
+#     sqlite3, optional liblz4). Defines _GNU_SOURCE and _FILE_OFFSET_BITS=64,
+#     probes <linux/io_uring.h> / <linux/aio_abi.h> / <xfs/xfs.h>, and requires
+#     RWF_NOWAIT (kernel >= 4.14) for the kernel-AIO raft I/O backend.
+#
+#   Windows — fully wired; builds and runs the test suites today. Deps via
+#     vcpkg in manifest mode (find_package: libuv, unofficial-sqlite3, optional
+#     lz4; libuv::uv_a is aliased to libuv::uv so static triplets work too).
+#     Adds the WIN32-only compat/win POSIX shim-header directory plus a forced
+#     include (/FI compat/win/dqlite_win_prelude.h), and links the
+#     dqlite_win_compat static library that implements the POSIX functions with
+#     no UCRT equivalent. Defines DQLITE_BUILDING so the public API is
+#     dllexport'ed from dqlite.dll, and renames the static archive to
+#     dqlite_static.lib so it cannot collide with the DLL's import library.
+#     DQLITE_HAVE_KAIO stays undefined off-Linux, so raft I/O uses the portable
+#     libuv threadpool write path.
+#
+#   macOS — NOT wired: the elseif(APPLE) branch is still a deliberate
+#     FATAL_ERROR stub. The __APPLE__-guarded source-level work exists but is
+#     unverified (no Mac available); wiring this branch is the next step, and a
+#     real compile is expected to surface further gaps.
+#
+# Structured this way so the file is upstreamable: a single build description
+# that grows a real backend per platform rather than a fork.
 #
 # Toolchain: configure with Clang on every platform for consistency
 #   Linux : cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang
 #   macOS : cmake -B build -G Ninja            (AppleClang is the default)
 #   Win   : cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang-cl  (MSVC ABI)
+#             -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+#             -DVCPKG_TARGET_TRIPLET=x64-windows
 # ---------------------------------------------------------------------------
 cmake_minimum_required(VERSION 3.16)
 
