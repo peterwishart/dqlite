@@ -319,6 +319,13 @@ function(dqlite_common_flags tgt)
     target_compile_options(${tgt} PRIVATE
       -fno-strict-aliasing -Wall -Wextra
       -Wno-unknown-warning-option -Wno-conversion)
+  elseif(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    # clang-cl sets MSVC=1, so the branch above never fires for it. Forward the
+    # same GNU-style flags through /clang: so the Windows build gets the exact
+    # warning set (and the load-bearing -fno-strict-aliasing) the Linux build has.
+    target_compile_options(${tgt} PRIVATE
+      /clang:-fno-strict-aliasing /clang:-Wall /clang:-Wextra
+      /clang:-Wno-unknown-warning-option /clang:-Wno-conversion)
   endif()
   if(DQLITE_SANITIZE)
     target_compile_options(${tgt} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
