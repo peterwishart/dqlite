@@ -97,22 +97,27 @@ typedef SSIZE_T ssize_t;
 #endif
 
 /*
- * off_t: MSVC/UCRT's <sys/types.h> defines off_t as a 32-bit `long`, but dqlite
- * (like POSIX/Linux) assumes a 64-bit off_t. The width difference is not merely
- * a large-file concern: in dqlite_server_start the guard
- * `full_size > (off_t)SSIZE_MAX` casts the 64-bit SSIZE_MAX (== INTPTR_MAX)
- * down to a 32-bit off_t, which truncates to -1, so the comparison is TRUE for
- * *any* file size (even 0) and dqlite_server_start spuriously returns
- * DQLITE_ERROR. Predefine the UCRT guard and provide a 64-bit off_t so all TUs
- * agree with the POSIX type. `_off_t` is kept as `long` to match the CRT's own
- * `struct stat`/`_lseek` layout. This header is on the include path on Windows
- * only, so the POSIX/Linux build is unaffected.
+ * off_t: use the UCRT's own definition -- a 32-bit `long` (its `_off_t`) --
+ * included here so every TU sees the name without needing <sys/types.h>
+ * itself. (UCRT only typedefs the non-underscore POSIX name when __STDC__ is
+ * off, which is the case under clang-cl's MSVC emulation; nothing in this
+ * build defines _CRT_DECLARE_NONSTDC_NAMES to change that.)
+ *
+ * A 32-bit off_t means dqlite must NEVER funnel a 64-bit file offset or size
+ * through off_t on Windows. Every compat entry point that takes an offset or
+ * length is therefore declared with `long long` (mmap, ftruncate, pread,
+ * pwrite, posix_fallocate), the UCRT lseek() this shim layer exposes returns
+ * `long` to match, and the one comparison that mixes off_t with the 64-bit
+ * SSIZE_MAX (src/server.c, dqlite_server_start) casts up to int64_t. The
+ * remaining off_t-typed values in the tree (raft metadata/segment file sizes,
+ * the WAL-index shm file size in vfs.c) are all far below 2 GiB by
+ * construction. An earlier iteration instead pre-defined the UCRT guard macro
+ * _OFF_T_DEFINED and typedef'ed off_t as __int64; that masked the root cause
+ * of the server.c truncation bug and hijacked a CRT-internal guard, risking a
+ * silent type mismatch with any UCRT or third-party header that disagreed
+ * (PORT_TODO.md W5), so it was removed.
  */
-#ifndef _OFF_T_DEFINED
-#define _OFF_T_DEFINED
-typedef long _off_t;
-typedef __int64 off_t;
-#endif
+#include <sys/types.h>
 
 #ifndef DQLITE_MODE_T_DEFINED
 #define DQLITE_MODE_T_DEFINED
