@@ -10,6 +10,7 @@
 
 #include <fcntl.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #if defined(__APPLE__)
@@ -1231,7 +1232,27 @@ err:
 static bool uvFsNoDirectIo(void)
 {
 	const char *env = getenv("DQLITE_IO_NO_DIRECT");
-	return env != NULL && env[0] != '\0';
+	bool forced = env != NULL && env[0] != '\0';
+	if (forced) {
+		/* This switch silently changes the write mechanism of a
+		 * production binary, so honouring it must never be silent:
+		 * warn once, unconditionally on stderr. The tracing paths
+		 * (dqlite's LIBDQLITE_TRACE, raft's per-instance tracer) are
+		 * opt-in and disabled in normal operation, so they cannot be
+		 * relied on to reach an operator. A benign race on the flag
+		 * can at worst print the warning twice. */
+		static bool warned = false;
+		if (!warned) {
+			warned = true;
+			fprintf(stderr,
+				"dqlite: WARNING: DQLITE_IO_NO_DIRECT is set: "
+				"direct I/O is disabled and the buffered-I/O + "
+				"fsync write path is used instead. This is a "
+				"testing switch and may reduce I/O "
+				"performance.\n");
+		}
+	}
+	return forced;
 }
 
 /* Check if direct I/O is possible on the given fd. */

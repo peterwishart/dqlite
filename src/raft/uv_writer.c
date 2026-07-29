@@ -1,5 +1,6 @@
 #include "uv_writer.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -63,7 +64,27 @@ struct UvWriterBackend
 static bool uvWriterThreadpoolForced(void)
 {
 	const char *env = getenv("DQLITE_IO_BACKEND");
-	return env != NULL && strcmp(env, "threadpool") == 0;
+	bool forced = env != NULL && strcmp(env, "threadpool") == 0;
+	if (forced) {
+		/* This switch silently changes the write mechanism of a
+		 * production binary, so honouring it must never be silent:
+		 * warn once, unconditionally on stderr. The tracing paths
+		 * (dqlite's LIBDQLITE_TRACE, raft's per-instance tracer) are
+		 * opt-in and disabled in normal operation, so they cannot be
+		 * relied on to reach an operator. A benign race on the flag
+		 * can at worst print the warning twice. */
+		static bool warned = false;
+		if (!warned) {
+			warned = true;
+			fprintf(stderr,
+				"dqlite: WARNING: DQLITE_IO_BACKEND=threadpool "
+				"is set: using the portable libuv-threadpool "
+				"write backend instead of Linux kernel AIO. "
+				"This is a testing switch and may reduce I/O "
+				"performance.\n");
+		}
+	}
+	return forced;
 }
 #endif /* DQLITE_HAVE_KAIO */
 
