@@ -121,7 +121,11 @@
 extern "C" {
 #endif
 
-#if defined(__GNUC__)
+/* __clang__ is checked as well as __GNUC__ because clang-cl (clang in MSVC
+ * compatibility mode, used for the Windows build) supports these GNU
+ * extensions but does not define __GNUC__. On GNU platforms both gcc and
+ * clang define __GNUC__, so the condition's value is unchanged there. */
+#if defined(__GNUC__) || defined(__clang__)
 #  define MUNIT_LIKELY(expr) (__builtin_expect ((expr), 1))
 #  define MUNIT_UNLIKELY(expr) (__builtin_expect ((expr), 0))
 #  define MUNIT_UNUSED __attribute__((__unused__))

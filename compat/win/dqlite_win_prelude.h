@@ -500,6 +500,22 @@ static inline int posix_fallocate(int fd, long long offset, long long len)
 	return 0;
 }
 
+/* ---- _wassert: restore the noreturn contract ------------------------------
+ * glibc declares assert()'s failure handler (__assert_fail) noreturn, so on
+ * Linux the compiler knows an `assert(0)` (dqlite's IMPOSSIBLE()/
+ * dqlite_assert(0) unreachable-default idiom in bind.c, tuple.c, server.c)
+ * terminates the enclosing branch. UCRT's <assert.h> declares _wassert()
+ * WITHOUT noreturn, so on Windows clang-cl assumes the assert can fall
+ * through and reports -Wsometimes-uninitialized for variables assigned in
+ * every reachable case. _wassert never returns in practice (it aborts or
+ * raises); declare it first -- this prelude is force-included before any TU
+ * line -- with the attribute so later UCRT redeclarations merge with it and
+ * the flow analysis matches Linux. (Signature per UCRT <assert.h>; the
+ * declaration is harmless under NDEBUG, where assert() never references it.) */
+_ACRTIMP __declspec(noreturn) void __cdecl _wassert(wchar_t const *_Message,
+						    wchar_t const *_File,
+						    unsigned _Line);
+
 /* ---- __assert_fail (glibc) -----------------------------------------------
  * The test runner (test/lib/runner.h) and src/lib/assert.c call __assert_fail
  * directly with glibc's 4-argument signature. UCRT provides _wassert instead

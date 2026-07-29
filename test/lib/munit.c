@@ -315,7 +315,10 @@ munit_malloc_ex(const char* filename, int line, size_t size) {
 #endif
 
 #if !defined(PSNIP_CLOCK_STATIC_INLINE)
-#  if defined(__GNUC__)
+/* __clang__ is checked as well as __GNUC__ because clang-cl (the Windows
+ * build) supports __attribute__((__unused__)) but does not define __GNUC__;
+ * on GNU platforms gcc and clang both define __GNUC__, so nothing changes. */
+#  if defined(__GNUC__) || defined(__clang__)
 #    define PSNIP_CLOCK__COMPILER_ATTRIBUTES __attribute__((__unused__))
 #  else
 #    define PSNIP_CLOCK__COMPILER_ATTRIBUTES

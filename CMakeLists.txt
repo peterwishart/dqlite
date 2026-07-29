@@ -326,6 +326,13 @@ function(dqlite_common_flags tgt)
     target_compile_options(${tgt} PRIVATE
       /clang:-fno-strict-aliasing /clang:-Wall /clang:-Wextra
       /clang:-Wno-unknown-warning-option /clang:-Wno-conversion)
+    # -- Windows-only warning triage (separate from the base flags above) --
+    # -Wno-gnu-folding-constant: the vendored raft tests (test_uv_init.c,
+    # test_uv_set_term.c) size arrays with const-qualified variables; clang
+    # accepts that as a GNU extension and gcc (the Linux compiler) has no such
+    # diagnostic. Pure extension-acceptance noise, not a defect.
+    target_compile_options(${tgt} PRIVATE
+      /clang:-Wno-gnu-folding-constant)
   endif()
   if(DQLITE_SANITIZE)
     target_compile_options(${tgt} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
@@ -374,6 +381,21 @@ function(dqlite_link_deps tgt)
     target_link_options(${tgt} PRIVATE --coverage)
   endif()
 endfunction()
+
+# -- Windows-only warning triage, per-file scope (see the clang-cl block in
+# dqlite_common_flags above for the tree-wide ones) --
+# src/lib/addr.c compares socket lengths whose types differ per platform:
+# Winsock declares socklen_t as (signed) int and addrinfo.ai_addrlen as
+# size_t, where POSIX has unsigned socklen_t on both sides -- so two
+# comparisons in this SHARED file are signed/unsigned on Windows only. The
+# values are small and non-negative for every valid call, and the file must
+# stay byte-identical on Linux, so suppress -Wsign-compare for this one file
+# instead of editing it. Source properties are directory-scoped; every dqlite
+# target is defined in this file, so the property reaches all of them.
+if(WIN32 AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+  set_source_files_properties(src/lib/addr.c PROPERTIES
+    COMPILE_OPTIONS "/clang:-Wno-sign-compare")
+endif()
 
 # Windows-only static library backing the POSIX-compat shim headers. Defined
 # before the first dqlite_link_deps() call so it is visible when targets link
