@@ -794,9 +794,31 @@ item is done, not whether):
     before and after. Full Windows build + suites. Zero Linux diff by
     construction (the directory is WIN32-only).
 
-- [ ] **W4 — MAJOR: the entire Windows build compiles with warnings off.**
+- [x] **W4 — MAJOR: the entire Windows build compiles with warnings off.**
       *(Same work as review §4.3 item 3 — do it here, once. Highest
       payoff-per-line item on the list.)*
+      **DONE (2026-07-29), two commits (= S3).** (1) Flag enable:
+      `elseif(CMAKE_C_COMPILER_ID MATCHES "Clang")` branch in
+      `dqlite_common_flags()` forwards
+      `/clang:-fno-strict-aliasing /clang:-Wall /clang:-Wextra
+      /clang:-Wno-unknown-warning-option /clang:-Wno-conversion` — surfaced
+      **710 warnings** (655 `-Wunused-parameter`, 22 `-Wgnu-folding-constant`,
+      11 `-Wunused-function`, 4 `-Wsometimes-uninitialized`,
+      2 `-Wsign-compare`). (2) Triage to **zero**, no shared-code defects
+      found: munit's `MUNIT_UNUSED`/psnip-clock attribute gates widened
+      `__GNUC__`→`|| __clang__` (666 warnings — test code was already
+      annotated, the gate just missed clang-cl; Linux truth-value unchanged);
+      prelude declares UCRT `_wassert` `__declspec(noreturn)` (UCRT omits it,
+      glibc's `__assert_fail` has it) so the shared `default: dqlite_assert(0)`
+      idiom stops tripping `-Wsometimes-uninitialized` — fixed at the platform
+      layer, diagnostic stays live; two justified suppressions:
+      `-Wno-gnu-folding-constant` tree-wide (vendored raft tests, gcc has no
+      equivalent diagnostic) and per-file `-Wno-sign-compare` for
+      `src/lib/addr.c` (Winsock `socklen_t` is signed int / `ai_addrlen` is
+      `size_t`; file must stay byte-identical on Linux). Verified: clean
+      rebuild 0 warnings/0 errors; `unit-test` 319/319, `raft-uv-unit` 20/20,
+      `raft-uv-integration` 212/212 (re-run mandatory since
+      `-fno-strict-aliasing` changes codegen), `server` 8/8, `stress` 45/45.
   - **Verified evidence.** `CMakeLists.txt:295` gates
     `-fno-strict-aliasing -Wall -Wextra -Wno-unknown-warning-option
     -Wno-conversion` behind `if(NOT MSVC)`, and **clang-cl sets `MSVC=1`** — so
@@ -1048,7 +1070,9 @@ warnings catch substitution mistakes, then re-audit what is left of W7/W9.
   - **Deliverable for this branch:** a short note in `PORT_DESIGN.md` recording
     the two-tier plan and the carve-out surface. No functional change.
 
-- [ ] **S3 — Fix the warning gate.** Same work as **W4** (`CMakeLists.txt:295`,
+- [x] **S3 — Fix the warning gate.** (DONE 2026-07-29 — delivered by W4's two
+      commits: clang-cl flag branch + 710→0 warning triage; see W4 for the
+      breakdown.) Same work as **W4** (`CMakeLists.txt:295`,
       `if(NOT MSVC)` → detect clang-cl and pass
       `/clang:-Wall /clang:-fno-strict-aliasing`). One line to enable, then the
       warning triage. Tracked in W4; tick both together.
