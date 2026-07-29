@@ -2239,7 +2239,27 @@ static int vfsMainFileShmLock(sqlite3_file *file, int ofst, int n, int flags)
 	}
 
 	if (rv == SQLITE_OK && ofst == VFS__WAL_WRITE_LOCK && n == 1 && flags & SQLITE_SHM_EXCLUSIVE) {
-		rv = (flags & SQLITE_SHM_LOCK) ? vfsRedirectShm(f) : vfsPublishShm(f);
+		if (flags & SQLITE_SHM_LOCK) {
+			rv = vfsRedirectShm(f);
+			if (rv != SQLITE_OK) {
+				/* SQLite will treat this xShmLock call as
+				 * failed, so release the exclusive lock taken
+				 * above to keep the lock bookkeeping consistent
+				 * with that view; otherwise a later attempt to
+				 * take the write lock would trip the
+				 * PRE(exclMask) assertions above. Reachable
+				 * only when vfsShmRemap fails, i.e. when a
+				 * transient mmap failure has already been
+				 * turned into an error return. */
+				int rv2 = vfsShmUnlock(&f->database->shm, ofst,
+						       n, true);
+				if (rv2 == SQLITE_OK) {
+					f->exclMask &= (uint16_t)~mask;
+				}
+			}
+		} else {
+			rv = vfsPublishShm(f);
+		}
 	}
 
 	POST((f->exclMask & f->sharedMask) == 0);

@@ -679,7 +679,31 @@ item is done, not whether):
     `stress`; record the write-throughput delta before/after. Linux must be
     byte-identical — `clang -E -P` diff the touched files to prove it.
 
-- [ ] **W2 — CRITICAL: `mmap(MAP_FIXED)` failure is unrecoverable and unhandled.**
+- [x] **W2 — CRITICAL: `mmap(MAP_FIXED)` failure is unrecoverable and unhandled.**
+      **DONE (2026-07-29), two commits.** (1) Shim: MAP_FIXED failure now
+      recovers — unmap-fails → old view intact, return MAP_FAILED/ENOMEM;
+      replace-fails → RESTORE a view of the same section/offset at the same
+      address (falls back PAGE_WRITECOPY→PAGE_READWRITE) then MAP_FAILED/
+      ENOMEM; restore-also-fails → errno=ENOTRECOVERABLE + stderr diagnostic,
+      range stays a reserved placeholder (never re-allocatable → cannot alias;
+      later munmap=EINVAL by design). Pre-1803 MapViewOfFileEx fallback
+      DELETED (unfixable unmap/map race): placeholders are a hard requirement,
+      one-time diagnostic + ENOSYS, README documents the 1803+ floor.
+      Test-only fault hook `DQLITE_WIN_MMAP_FIXED_FAIL_AT=N` (cached getenv,
+      inert unset). (2) VFS (shared, option (a) as directed):
+      `vfsShmPublishRegion`→int, `vfsPublishShm` propagates
+      SQLITE_IOERR_SHMMAP — all error returns gated `vfsNoMremap()`; Linux
+      mremap-path asserts verbatim (mechanical linux-view diff clean).
+      Fault-sweep positions 1-6: publish-path failures recover transparently
+      (test OK), redirect-path failures → clean `SQLITE 7 out of memory`, no
+      AV/abort at any position. **Sweep found+fixed an 12th real bug (own
+      unguarded commit, Linux-relevant):** `vfsMainFileShmLock` returned
+      redirect failure while leaving the just-taken exclusive write lock +
+      `exclMask` set → SQLite's retry tripped `PRE((f->exclMask & mask)==0)` =
+      guaranteed deferred abort (reproduced: CRT exit 3); now releases the
+      lock/mask on that path — upstream-reachable via vfsShmRemap's
+      "should never happen" mmap failure. Verified: unit-test 319/319,
+      stress 45/45, injection→exit 1 (clean FAIL) not 3 (abort).
   - **Verified evidence.** `compat/win/compat_win.c:833-869`: on the MAP_FIXED
     path the shim does `UnmapViewOfFile2(MEM_PRESERVE_PLACEHOLDER)` then
     `MapViewOfFile3(MEM_REPLACE_PLACEHOLDER)`; the cleanup at `:861-864` is
