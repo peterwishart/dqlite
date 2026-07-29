@@ -51,15 +51,21 @@ struct UvWriterBackend
 	void (*destroy)(struct UvWriter *w);
 };
 
+#if defined(DQLITE_HAVE_KAIO)
 /* Whether the portable libuv-threadpool write backend has been forced via the
  * DQLITE_IO_BACKEND=threadpool environment variable. This backend avoids the
  * Linux-only kernel AIO / eventfd machinery and is the basis for the
- * macOS/Windows port (see PORT_DESIGN.md). */
+ * macOS/Windows port (see PORT_DESIGN.md). It is the ONLY way to select the
+ * portable backend on a kernel-AIO build: without it the AIO backend is used
+ * even when fully async I/O is unavailable, exactly like upstream (see the
+ * backend selection in UvWriterInit). On builds without kernel AIO the
+ * portable backend is unconditional and this switch is meaningless. */
 static bool uvWriterThreadpoolForced(void)
 {
 	const char *env = getenv("DQLITE_IO_BACKEND");
 	return env != NULL && strcmp(env, "threadpool") == 0;
 }
+#endif /* DQLITE_HAVE_KAIO */
 
 /******************************************************************************
  *
@@ -788,20 +794,26 @@ int UvWriterInit(struct UvWriter *w,
 	w->closing = false;
 	w->errmsg = errmsg;
 
-	/* Select the raw-write backend. The portable threadpool backend is used
-	 * when explicitly forced or whenever fully async kernel I/O is
-	 * unavailable (always on macOS/Windows); otherwise the kernel-AIO fast
-	 * path is used. */
-	threadpool = uvWriterThreadpoolForced() || !async;
-	w->threadpool = threadpool;
+	/* Select the raw-write backend. On builds with kernel AIO (Linux) the
+	 * AIO backend is always the default, matching upstream: when fully
+	 * async I/O is unsupported (async == false, e.g. tmpfs or ZFS, where
+	 * RWF_NOWAIT submission fails the probe) it runs the very same
+	 * io_submit + io_getevents pair blocking in the libuv threadpool
+	 * (uvWriterWorkCb), NOT plain pwritev. The portable threadpool backend
+	 * is reachable on such builds only by explicit opt-in via
+	 * DQLITE_IO_BACKEND=threadpool, so the production Linux write
+	 * mechanism is unchanged by the port. Builds without kernel AIO
+	 * (Windows, macOS, DQLITE_DISABLE_KAIO) have only the portable
+	 * backend. */
 #if defined(DQLITE_HAVE_KAIO)
+	threadpool = uvWriterThreadpoolForced();
 	w->backend =
 	    threadpool ? &uvWriterThreadpoolBackend : &uvWriterAioBackend;
 #else
-	/* Without kernel AIO only the portable backend exists. */
-	dqlite_assert(threadpool);
+	threadpool = true;
 	w->backend = &uvWriterThreadpoolBackend;
 #endif
+	w->threadpool = threadpool;
 
 	/* Set direct I/O if available. */
 	if (direct) {

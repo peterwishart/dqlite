@@ -40,11 +40,16 @@ The portable backend needs **none** of the Linux-only primitives: no
 libuv's threadpool and `uv_fs_write`, both fully cross-platform. That removes
 exactly the four `TODO`-flagged calls from the portable path.
 
-Selection (initial): environment variable `DQLITE_IO_BACKEND=threadpool` forces
-the portable backend; default is unchanged (probe → `aio`). End state: the
-capability probe in `uv_fs.c` selects `threadpool` automatically whenever fully
-async kernel I/O is unavailable (i.e. always on macOS/Windows), which is exactly
-what the existing `bool async` parameter already expresses.
+Selection: on kernel-AIO builds (Linux) the `aio` backend is always the
+default, matching upstream — when fully async I/O is unavailable (`async ==
+false`, e.g. tmpfs/ZFS) it runs the same `io_submit` + `io_getevents` pair
+*blocking in the threadpool* rather than switching mechanism. The environment
+variable `DQLITE_IO_BACKEND=threadpool` is the only way to select the portable
+backend on such builds (the Linux-testability lever below). Builds without
+kernel AIO (macOS/Windows, or Linux with `DQLITE_DISABLE_KAIO`) have only the
+portable backend. (An earlier iteration auto-selected `threadpool` whenever
+`async == false`; that silently changed the production Linux write mechanism
+on tmpfs/ZFS and was reverted — see PORT_TODO.md W6(a).)
 
 Eventual file split (clean form, not required for first validation):
 ```
