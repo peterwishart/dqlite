@@ -1932,7 +1932,10 @@ int dqlite_server_start(dqlite_server *server)
 
 	full_size = lseek(info_fd, 0, SEEK_END);
 	dqlite_assert(full_size >= 0);
-	if (full_size > (off_t)SSIZE_MAX) {
+	/* Compare in a 64-bit type: casting SSIZE_MAX *down* to off_t instead
+	 * would truncate (to -1) on platforms where off_t is narrower than
+	 * ssize_t, making this guard trip for every file size. */
+	if ((int64_t)full_size > (int64_t)SSIZE_MAX) {
 		goto err_after_open_store;
 	}
 	size = (ssize_t)full_size;
@@ -1957,7 +1960,8 @@ int dqlite_server_start(dqlite_server *server)
 
 	full_size = lseek(store_fd, 0, SEEK_END);
 	dqlite_assert(full_size >= 0);
-	if (full_size > (off_t)SSIZE_MAX) {
+	/* See the 64-bit comparison rationale above. */
+	if ((int64_t)full_size > (int64_t)SSIZE_MAX) {
 		goto err_after_open_store;
 	}
 	size = (ssize_t)full_size;
