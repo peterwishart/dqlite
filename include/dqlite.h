@@ -186,6 +186,12 @@ DQLITE_API DQLITE_EXPERIMENTAL int dqlite_server_set_connect_func(
  *
  * Once this function returns successfully, the server will be ready to accept
  * client requests using the functions below.
+ *
+ * The server drives an underlying dqlite_node whose lifetime is entirely
+ * internal to the dqlite_server object: there is no API that exposes that
+ * node to the caller. In particular, starting the server again after
+ * dqlite_server_stop destroys the node left behind by the previous run and
+ * creates a fresh one.
  */
 DQLITE_API DQLITE_EXPERIMENTAL int dqlite_server_start(dqlite_server *server);
 

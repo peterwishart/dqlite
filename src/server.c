@@ -1996,7 +1996,11 @@ int dqlite_server_start(dqlite_server *server)
 	 * behind: dqlite_server_stop() only calls dqlite_node_stop(), not
 	 * dqlite_node_destroy(). Restarting the server then overwrites
 	 * server->local with a freshly created node below, leaking the old one
-	 * (and all the SQLite VFS/registry state it owns). Destroy it first. */
+	 * (and all the SQLite VFS/registry state it owns). Destroy it first.
+	 * This is safe from use-after-free because the node is owned
+	 * exclusively by the dqlite_server: no public API hands server->local
+	 * to the caller, so nobody else can retain a pointer to the destroyed
+	 * node (see the dqlite_server_start docs in include/dqlite.h). */
 	if (server->local != NULL) {
 		dqlite_node_destroy(server->local);
 		server->local = NULL;
