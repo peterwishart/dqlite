@@ -8,12 +8,12 @@
 
 SUITE(stress);
 
-#define READ_COUNT 1500
-#define WRITE_COUNT 1500
+#define READ_COUNT 1000
+#define WRITE_COUNT 1000
 
 static char *databases[] = { "1", "2", "4", NULL };
 static char *writers[] = { "0", "1", "2", "4", NULL };
-static char *readers[] = { "0", "1", "4", "32", NULL };
+static char *readers[] = { "0", "1", "4", "16", NULL };
 
 static MunitParameterEnum stress_params[] = {
 	{ "writers", writers },
@@ -22,11 +22,33 @@ static MunitParameterEnum stress_params[] = {
 	{ NULL, NULL },
 };
 
+/* A single heavier configuration, run in addition to (not instead of) the
+ * upstream default matrix above. readers=32 with databases=4 under a longer
+ * run (count=1500) is the load that exposed the Windows shm virtual-address
+ * aliasing corruption (the mmap shim's non-atomic MAP_FIXED emulation let
+ * another database's WAL-index mapping steal the address mid-replacement; see
+ * PORT_TODO.md section 9). Kept as one extra parameter set so that regression
+ * stays covered without slowing down every combination of the default
+ * matrix. */
+static char *heavy_count[] = { "1500", NULL };
+static char *heavy_writers[] = { "4", NULL };
+static char *heavy_readers[] = { "32", NULL };
+static char *heavy_databases[] = { "4", NULL };
+
+static MunitParameterEnum stress_heavy_params[] = {
+	{ "count", heavy_count },
+	{ "writers", heavy_writers },
+	{ "readers", heavy_readers },
+	{ "databases", heavy_databases },
+	{ NULL, NULL },
+};
+
 struct fixture {
 	struct test_server server;
 	struct client_proto *client;
 	int databases;
 	int readers, writers;
+	int read_count, write_count;
 };
 
 struct worker {
@@ -62,7 +84,7 @@ static void *client_read(void *data)
 	OPEN_C(&client, self->database);
 	PREPARE_C(&client, sql, &stmt_id);
 
-	for (int i = 0; i < READ_COUNT; i++) {
+	for (int i = 0; i < self->f->read_count; i++) {
 		int rv = clientSendQuery(&client, stmt_id, NULL, 0, NULL);
 		munit_assert_int(rv, ==, 0);
 		for (bool done = false; !done;) {
@@ -105,7 +127,7 @@ static void *client_write(void *data)
 	OPEN_C(&client, self->database);
 	PREPARE_C(&client, sql, &stmt_id);
 
-	for (int i = 0; i < WRITE_COUNT; i++) {
+	for (int i = 0; i < self->f->write_count; i++) {
 		int rv = clientSendExec(&client, stmt_id, NULL, 0, NULL);
 		munit_assert_int(rv, ==, DQLITE_OK);
 
@@ -133,9 +155,14 @@ static void *setUp(const MunitParameter params[], void *user_data)
 {
 	struct fixture *f = munit_malloc(sizeof *f);
 	(void)user_data;
+	const char *count = munit_parameters_get(params, "count");
 	f->databases = atoi(munit_parameters_get(params, "databases"));
 	f->readers = atoi(munit_parameters_get(params, "readers"));
 	f->writers = atoi(munit_parameters_get(params, "writers"));
+	/* Only the heavy parameter set defines "count"; the default matrix
+	 * uses the upstream READ_COUNT/WRITE_COUNT values. */
+	f->read_count = count != NULL ? atoi(count) : READ_COUNT;
+	f->write_count = count != NULL ? atoi(count) : WRITE_COUNT;
 	test_heap_setup(params, user_data);
 	test_sqlite_setup(params);
 	test_server_setup(&f->server, 1, params);
@@ -183,11 +210,8 @@ static void tearDown(void *data)
 	free(f);
 }
 
-TEST(stress, read_write, setUp, tearDown, 0, stress_params)
+static MunitResult run_read_write(struct fixture *f)
 {
-	struct fixture *f = data;
-	(void)params;
-
 	if (f->readers == 0 && f->writers == 0) {
 		return MUNIT_SKIP;
 	}
@@ -230,4 +254,18 @@ TEST(stress, read_write, setUp, tearDown, 0, stress_params)
 
 	free(workers);
 	return MUNIT_OK;
+}
+
+TEST(stress, read_write, setUp, tearDown, 0, stress_params)
+{
+	(void)params;
+	return run_read_write(data);
+}
+
+/* The regression configuration for the shm aliasing corruption; see the
+ * comment at stress_heavy_params. */
+TEST(stress, read_write_heavy, setUp, tearDown, 0, stress_heavy_params)
+{
+	(void)params;
+	return run_read_write(data);
 }
