@@ -1949,26 +1949,39 @@ static int vfsShmRemap(void *dest,
  * shm file at the given offset) at the fixed address dest, replacing the
  * private mapping currently there, and release the scratch mapping. Used by
  * vfsPublishShm, where the scratch mapping must stay live while the private
- * contents are merged into it before being published. See vfsNoMremap. */
-static void vfsShmPublishRegion(void *scratch,
-				void *dest,
-				size_t map_size,
-				int fd,
-				off_t offset)
+ * contents are merged into it before being published. See vfsNoMremap.
+ *
+ * Returns SQLITE_OK, or (only on the no-mremap fallback path) an error if the
+ * replacement mapping could not be installed. On the Linux mremap path a
+ * failure remains a hard assertion, as it always was. */
+static int vfsShmPublishRegion(void *scratch,
+			       void *dest,
+			       size_t map_size,
+			       int fd,
+			       off_t offset)
 {
 	if (vfsNoMremap()) {
 		void *region = mmap(dest, map_size, PROT_READ | PROT_WRITE,
 				    MAP_SHARED | MAP_FIXED, fd, offset);
-		dqlite_assert(region == dest);
 		int rv = munmap(scratch, map_size);
 		dqlite_assert(rv == 0);
-		return;
+		if (region == MAP_FAILED) {
+			/* On failure dest still holds a usable mapping (POSIX
+			 * leaves the previous mapping untouched; the Windows
+			 * shim restores a view before returning MAP_FAILED),
+			 * so degrade to an error instead of aborting. This
+			 * might leave the connection in a weird state. */
+			return SQLITE_IOERR_SHMMAP;
+		}
+		dqlite_assert(region == dest);
+		return SQLITE_OK;
 	}
 #ifdef MREMAP_MAYMOVE
 	void *remapped = mremap(scratch, map_size, map_size,
 				MREMAP_MAYMOVE | MREMAP_FIXED, dest);
 	dqlite_assert(remapped == dest);
 #endif
+	return SQLITE_OK;
 }
 
 /* vfsRedirectShm will turn the shared memory held by the SQLite connection
@@ -2034,11 +2047,19 @@ static int vfsPublishShm(struct vfsMainFile *f)
 		void *region = mmap(
 		    NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED,
 		    f->database->shm.fd, i * VFS__WAL_INDEX_REGION_SIZE);
+		if (vfsNoMremap() && region == MAP_FAILED) {
+			/* Only the fallback path degrades to an error; on the
+			 * Linux mremap path this stays a hard assertion. */
+			return SQLITE_IOERR_SHMMAP;
+		}
 		dqlite_assert(region != MAP_FAILED);
 		memcpy(region, f->mappedShmRegions.ptr[i], map_size);
-		vfsShmPublishRegion(region, f->mappedShmRegions.ptr[i],
-				    map_size, f->database->shm.fd,
-				    i * VFS__WAL_INDEX_REGION_SIZE);
+		int rv = vfsShmPublishRegion(region, f->mappedShmRegions.ptr[i],
+					     map_size, f->database->shm.fd,
+					     i * VFS__WAL_INDEX_REGION_SIZE);
+		if (rv != SQLITE_OK) {
+			return rv;
+		}
 	}
 
 	const size_t ckptInfoSize = 40;
@@ -2047,6 +2068,11 @@ static int vfsPublishShm(struct vfsMainFile *f)
 	void *first_region_private = f->mappedShmRegions.ptr[0];
 	void *first_region_shared = mmap(NULL, map_size, PROT_READ | PROT_WRITE,
 					 MAP_SHARED, f->database->shm.fd, 0);
+	if (vfsNoMremap() && first_region_shared == MAP_FAILED) {
+		/* Only the fallback path degrades to an error; on the Linux
+		 * mremap path this stays a hard assertion. */
+		return SQLITE_IOERR_SHMMAP;
+	}
 	dqlite_assert(first_region_shared != MAP_FAILED);
 
 	/* Copy the hash map array for the first region */
@@ -2097,10 +2123,9 @@ static int vfsPublishShm(struct vfsMainFile *f)
 		*sharedBackfillAttempted = *privateBackfillAttempted;
 	}
 
-	vfsShmPublishRegion(first_region_shared, f->mappedShmRegions.ptr[0],
-			    map_size, f->database->shm.fd, 0);
-
-	return SQLITE_OK;
+	return vfsShmPublishRegion(first_region_shared,
+				   f->mappedShmRegions.ptr[0], map_size,
+				   f->database->shm.fd, 0);
 }
 
 /* vfsRollbackShm will discard the changes made to the shared memory by a write

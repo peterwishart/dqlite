@@ -2,15 +2,16 @@
  * dqlite Windows port -- <sys/mman.h> minimal memory-mapping shim.
  *
  * Declares the mmap/munmap surface and the PROT_ / MAP_ flags used by
- * src/vfs.c (WAL shared-memory). The IMPLEMENTATION (CreateFileMapping /
- * MapViewOfFileEx / UnmapViewOfFile, and memfd_create via a delete-on-close
- * temp file) lives in compat/win/compat_win.c.
+ * src/vfs.c (WAL shared-memory). The IMPLEMENTATION (CreateFileMapping plus
+ * the Win10 1803+ placeholder APIs VirtualAlloc2/MapViewOfFile3/
+ * UnmapViewOfFile2 -- a hard requirement, see mmap() -- and memfd_create via
+ * a delete-on-close temp file) lives in compat/win/compat_win.c.
  *
  * NOTE: MREMAP_MAYMOVE is intentionally left UNDEFINED so vfs.c selects its
- * portable "no mremap" fallback (unmap + map-at-fixed-address), matching the
+ * portable "no mremap" fallback (map-at-fixed-address replace), matching the
  * macOS/Windows path described in PORT_DESIGN.md. Windows ONLY (compat/win/).
  *
- * Alignment contract: MapViewOfFileEx requires the target base address AND the
+ * Alignment contract: MapViewOfFile3 requires the target base address AND the
  * file offset to be multiples of the 64KiB allocation granularity. vfs.c derives
  * both from sysconf(_SC_PAGESIZE), which compat/win/unistd.h reports as the
  * allocation granularity, so every vfs mapping is 64KiB-aligned and satisfiable.

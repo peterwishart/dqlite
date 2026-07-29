@@ -651,9 +651,12 @@ static SRWLOCK dqliteMmapLock = SRWLOCK_INIT;
  * let a file view be swapped in and out of an address range WITHOUT ever
  * releasing that range -- the atomic-replace primitive dqlite's WAL-index shm
  * COW scheme needs (it is what makes Linux MAP_FIXED / mremap(MREMAP_FIXED)
- * safe). We resolve them dynamically from kernelbase.dll: when present, mmap()
- * uses them so a MAP_FIXED replacement never exposes a free window; when absent
- * (pre-1803), we fall back to the best-effort unmap-then-remap under the lock.
+ * safe). We resolve them dynamically from kernelbase.dll and REQUIRE them:
+ * dqlite already assumes Windows 10 1803+ elsewhere (high-resolution waitable
+ * timers, AF_UNIX sockets), and any unmap-then-remap fallback has an inherent
+ * race -- between UnmapViewOfFile() and MapViewOfFileEx() any other allocation
+ * in the process can steal the address, silently aliasing two databases' shm
+ * views. On pre-1803 systems mmap() fails cleanly with a diagnostic instead.
  *
  * Constants (winnt.h): MEM_RESERVE_PLACEHOLDER 0x40000, MEM_REPLACE_PLACEHOLDER
  * 0x4000, MEM_PRESERVE_PLACEHOLDER 0x2. */
@@ -718,6 +721,33 @@ static int dqliteHavePlaceholders(void)
 #define MEM_PRESERVE_PLACEHOLDER 0x00000002
 #endif
 
+/* Test-only fault injection for the MAP_FIXED replacement path in mmap(). When
+ * the DQLITE_WIN_MMAP_FIXED_FAIL_AT environment variable is set to a positive
+ * integer N, the N-th MAP_FIXED view replacement in the process behaves as if
+ * MapViewOfFile3() had failed, exercising the recovery path in mmap() and the
+ * error propagation in src/vfs.c. Inert (a single cached getenv) when the
+ * variable is unset. Must be called with dqliteMmapLock held (which is why a
+ * plain static suffices). */
+static long dqliteMmapFixedFailAt = -2; /* -2: env unread; -1: disabled */
+
+static int dqliteMmapFixedFaultInjected(void)
+{
+	if (dqliteMmapFixedFailAt == -2) {
+		const char *env = getenv("DQLITE_WIN_MMAP_FIXED_FAIL_AT");
+		long v = (env != NULL) ? atol(env) : 0;
+		dqliteMmapFixedFailAt = v > 0 ? v : -1;
+	}
+	if (dqliteMmapFixedFailAt > 0 && --dqliteMmapFixedFailAt == 0) {
+		dqliteMmapFixedFailAt = -1;
+		fprintf(stderr,
+			"dqlite: mmap: injecting MAP_FIXED failure "
+			"(DQLITE_WIN_MMAP_FIXED_FAIL_AT)\n");
+		SetLastError(ERROR_COMMITMENT_LIMIT);
+		return 1;
+	}
+	return 0;
+}
+
 /* memfd_create: an anonymous, in-memory-ish file. Backed by a uniquely named
  * temp file opened FILE_FLAG_DELETE_ON_CLOSE (so it disappears when the CRT fd
  * is closed) and FILE_ATTRIBUTE_TEMPORARY (so the OS keeps it in cache and
@@ -772,12 +802,26 @@ void *mmap(void *addr,
 	HANDLE hFile;
 	HANDLE hMap;
 	DWORD protect;
-	DWORD access;
-	DWORD offHigh;
-	DWORD offLow;
 	void *base;
 
 	(void)prot; /* vfs.c always maps PROT_READ|PROT_WRITE */
+
+	/* Hard requirement: the Win10 1803+ placeholder APIs. See the comment
+	 * at dqliteResolvePlaceholderApis() -- without them a MAP_FIXED replace
+	 * cannot be done without a use-after-free-style address race, so we
+	 * refuse to map at all rather than run subtly corrupted. */
+	if (!dqliteHavePlaceholders()) {
+		static LONG diagnosed;
+		if (InterlockedExchange(&diagnosed, 1) == 0) {
+			fprintf(stderr,
+				"dqlite: mmap: this Windows version lacks the "
+				"placeholder mapping APIs (VirtualAlloc2/"
+				"MapViewOfFile3/UnmapViewOfFile2); dqlite "
+				"requires Windows 10 1803 or later\n");
+		}
+		errno = ENOSYS;
+		return MAP_FAILED;
+	}
 
 	hFile = (HANDLE)_get_osfhandle(fd);
 	if (hFile == INVALID_HANDLE_VALUE || hFile == NULL) {
@@ -788,10 +832,8 @@ void *mmap(void *addr,
 	if (flags & MAP_PRIVATE) {
 		/* copy-on-write: writes stay private to this view */
 		protect = PAGE_WRITECOPY;
-		access = FILE_MAP_COPY;
 	} else { /* MAP_SHARED */
 		protect = PAGE_READWRITE;
-		access = FILE_MAP_READ | FILE_MAP_WRITE;
 	}
 
 	/* dwMaximumSize 0 => the file's current size, which vfs.c has already
@@ -801,12 +843,6 @@ void *mmap(void *addr,
 		errno = ENOMEM;
 		return MAP_FAILED;
 	}
-
-	(void)access; /* MapViewOfFile3 takes PAGE_* protection directly */
-	offHigh = (DWORD)((unsigned long long)offset >> 32);
-	offLow = (DWORD)((unsigned long long)offset & 0xFFFFFFFFu);
-	(void)offHigh;
-	(void)offLow;
 
 	/* dqlite drives the WAL-index shm mappings (vfs.c) from multiple
 	 * threadpool worker threads concurrently -- one per database -- and its
@@ -827,45 +863,97 @@ void *mmap(void *addr,
 	 * MAP_FIXED replace (UnmapViewOfFile2(...PRESERVE) then
 	 * MapViewOfFile3(...REPLACE)) never exposes a free window -- matching the
 	 * Linux atomic-replace semantics exactly. The lock still serialises the
-	 * multi-step sequences for good measure. If the placeholder API is
-	 * unavailable (pre-1803), fall back to the best-effort unmap+remap. */
+	 * multi-step sequences for good measure. The placeholder API is a hard
+	 * requirement (checked above); there is no pre-1803 fallback. */
 	AcquireSRWLockExclusive(&dqliteMmapLock);
 
-	if (dqliteHavePlaceholders()) {
-		void *target = addr;
-		if ((flags & MAP_FIXED) && addr != NULL) {
-			/* Turn the existing view back into a placeholder,
-			 * keeping the address reserved to us. */
-			dqliteUnmapViewOfFile2(GetCurrentProcess(), addr,
-					       MEM_PRESERVE_PLACEHOLDER);
-		} else {
-			/* Reserve a fresh placeholder range; the kernel picks a
-			 * free address and it stays ours until we release it. */
-			target = dqliteVirtualAlloc2(
-			    NULL, NULL, length,
-			    MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
-			    NULL, 0);
-			if (target == NULL) {
-				ReleaseSRWLockExclusive(&dqliteMmapLock);
-				CloseHandle(hMap);
-				errno = ENOMEM;
-				return MAP_FAILED;
-			}
+	int fixed = (flags & MAP_FIXED) && addr != NULL;
+	void *target = addr;
+	if (fixed) {
+		/* Turn the existing view back into a placeholder, keeping the
+		 * address reserved to us. */
+		if (!dqliteUnmapViewOfFile2(GetCurrentProcess(), addr,
+					    MEM_PRESERVE_PLACEHOLDER)) {
+			/* The old view is still intact at addr, so the caller's
+			 * pointers stay valid -- same defined state as a failed
+			 * MAP_FIXED mmap on Linux, which leaves the previous
+			 * mapping untouched. */
+			DWORD err = GetLastError();
+			ReleaseSRWLockExclusive(&dqliteMmapLock);
+			CloseHandle(hMap);
+			fprintf(stderr,
+				"dqlite: mmap: UnmapViewOfFile2(%p) failed "
+				"(GetLastError=%lu)\n",
+				addr, err);
+			errno = ENOMEM;
+			return MAP_FAILED;
 		}
+	} else {
+		/* Reserve a fresh placeholder range; the kernel picks a
+		 * free address and it stays ours until we release it. */
+		target = dqliteVirtualAlloc2(
+		    NULL, NULL, length,
+		    MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
+		    NULL, 0);
+		if (target == NULL) {
+			ReleaseSRWLockExclusive(&dqliteMmapLock);
+			CloseHandle(hMap);
+			errno = ENOMEM;
+			return MAP_FAILED;
+		}
+	}
+	if (fixed && dqliteMmapFixedFaultInjected()) {
+		base = NULL; /* test-only: simulate MapViewOfFile3 failure */
+	} else {
 		base = dqliteMapViewOfFile3(hMap, GetCurrentProcess(), target,
 					    (ULONG64)offset, length,
 					    MEM_REPLACE_PLACEHOLDER, protect,
 					    NULL, 0);
-		if (base == NULL && !(flags & MAP_FIXED)) {
+	}
+	if (base == NULL) {
+		DWORD err = GetLastError();
+		if (fixed) {
+			/* CRITICAL recovery: the old view is gone and the range
+			 * is now a PAGE_NOACCESS placeholder, but the caller
+			 * (SQLite via vfs.c) still holds pointers into it and
+			 * expects mmap(MAP_FIXED) failure to leave a usable
+			 * mapping behind (as on Linux). Restore a view of the
+			 * same section/offset at the address -- first with the
+			 * requested protection, then (for a failed copy-on-write
+			 * request, which needs extra commit charge) with plain
+			 * PAGE_READWRITE -- so the process stays in a defined
+			 * state. mmap() still reports failure either way. */
+			void *restored = dqliteMapViewOfFile3(
+			    hMap, GetCurrentProcess(), target, (ULONG64)offset,
+			    length, MEM_REPLACE_PLACEHOLDER, protect, NULL, 0);
+			if (restored == NULL && protect != PAGE_READWRITE) {
+				restored = dqliteMapViewOfFile3(
+				    hMap, GetCurrentProcess(), target,
+				    (ULONG64)offset, length,
+				    MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE,
+				    NULL, 0);
+			}
+			if (restored == NULL) {
+				/* Unrecoverable: the range stays a reserved
+				 * PAGE_NOACCESS placeholder (still owned by us,
+				 * so at least it cannot be reallocated and
+				 * aliased); any access to it will fault.
+				 * Signal it distinctly and loudly. */
+				fprintf(stderr,
+					"dqlite: mmap: MAP_FIXED replacement at "
+					"%p failed (GetLastError=%lu) and the "
+					"view could not be restored; the range "
+					"is no longer accessible\n",
+					target, err);
+				errno = ENOTRECOVERABLE;
+			} else {
+				errno = ENOMEM;
+			}
+		} else {
 			/* Mapping failed: release the placeholder we reserved. */
 			VirtualFree(target, 0, MEM_RELEASE);
+			errno = ENOMEM;
 		}
-	} else {
-		if ((flags & MAP_FIXED) && addr != NULL) {
-			UnmapViewOfFile(addr);
-		}
-		base = MapViewOfFileEx(hMap, access, offHigh, offLow, length,
-				       (flags & MAP_FIXED) ? addr : NULL);
 	}
 
 	ReleaseSRWLockExclusive(&dqliteMmapLock);
@@ -875,8 +963,7 @@ void *mmap(void *addr,
 	CloseHandle(hMap);
 
 	if (base == NULL) {
-		errno = ENOMEM;
-		return MAP_FAILED;
+		return MAP_FAILED; /* errno set above */
 	}
 	return base;
 }
@@ -885,17 +972,19 @@ int munmap(void *addr, size_t length)
 {
 	BOOL ok;
 	(void)length; /* a view is unmapped whole, by its base address */
+	if (!dqliteHavePlaceholders()) {
+		/* mmap() can never succeed without the placeholder APIs (hard
+		 * 1803+ requirement), so there is no view to unmap. */
+		errno = ENOSYS;
+		return -1;
+	}
 	AcquireSRWLockExclusive(&dqliteMmapLock);
-	if (dqliteHavePlaceholders()) {
-		/* Unmap the view but keep the placeholder, then release the
-		 * reserved range so the address is fully returned to the OS. */
-		ok = dqliteUnmapViewOfFile2(GetCurrentProcess(), addr,
-					    MEM_PRESERVE_PLACEHOLDER);
-		if (ok) {
-			VirtualFree(addr, 0, MEM_RELEASE);
-		}
-	} else {
-		ok = UnmapViewOfFile(addr);
+	/* Unmap the view but keep the placeholder, then release the
+	 * reserved range so the address is fully returned to the OS. */
+	ok = dqliteUnmapViewOfFile2(GetCurrentProcess(), addr,
+				    MEM_PRESERVE_PLACEHOLDER);
+	if (ok) {
+		VirtualFree(addr, 0, MEM_RELEASE);
 	}
 	ReleaseSRWLockExclusive(&dqliteMmapLock);
 	if (!ok) {

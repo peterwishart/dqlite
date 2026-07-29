@@ -134,6 +134,17 @@ on Windows the **CMake** build (`CMakeLists.txt`) is used instead, together with
 a small POSIX compatibility layer under `compat/win/`. The toolchain is **Clang**
 (`clang-cl`) with **Ninja**, and dependencies are provided by **vcpkg**.
 
+**Windows 10 version 1803 (April 2018) or later is required at runtime.** The
+port depends on the placeholder virtual-memory APIs introduced in 1803
+(`VirtualAlloc2`/`MapViewOfFile3`/`UnmapViewOfFile2`) to replace WAL-index
+shared-memory mappings in place without ever releasing the address range —
+the equivalent of Linux's atomic `mremap(MREMAP_FIXED)`. There is deliberately
+no pre-1803 fallback: an unmap-then-remap sequence has an unfixable window in
+which another thread can be handed the same address, silently corrupting the
+WAL index. On older systems dqlite fails cleanly with a diagnostic on the first
+shared-memory mapping instead of running incorrectly. (Other parts of the port,
+such as `AF_UNIX` socket support, assume the same 1803+ floor.)
+
 ### Prerequisites
 
 * **Visual Studio 2022** with the *C++ Clang tools for Windows* component
