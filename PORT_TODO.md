@@ -1207,8 +1207,21 @@ warnings catch substitution mistakes, then re-audit what is left of W7/W9.
     `raft-uv-unit` 25/25, integration suites, plus the ASAN build; Windows full
     suite parity with the numbers in §0/§7/§9.
 
-- [ ] **S2 — Carve the named-pipe local transport out of the first upstream
+- [x] **S2 — Carve the named-pipe local transport out of the first upstream
       iteration** (defaulting Windows to TCP loopback, which already works).
+      **DONE (2026-07-30), one doc-only commit.** PORT_DESIGN.md gained a
+      "Windows local transport (@name): two-tier upstreaming plan" section:
+      pipe layer stays on this branch; first upstream PR makes Windows
+      `@name` binds return `DQLITE_MISUSE` with tests on TCP loopback; pipe
+      transport is a later standalone PR carrying the two hard-won
+      discoveries (non-overlapped-pipe threadpool deadlock;
+      `uv_pipe_pending_instances` vs backlog) as its justification. The
+      carve-out surface was re-verified against the current tree (this
+      item's anchors below are stale — dqlite_win_pipe.h is now 176 lines,
+      the server.c dispatch moved, etc.; see PORT_DESIGN.md for the current
+      table), including what must SURVIVE the carve-out (listenCb's
+      UV_NAMED_PIPE cases = upstream Linux AF_UNIX handling; Winsock
+      blocks = the first-PR posture) and a post-carve grep sanity check.
   - **Correction to the review, important for planning:** §4.3 states the pipe
     transport "is only reachable through the test harness's custom connect
     function". On this branch that is **not** accurate — it is production code
