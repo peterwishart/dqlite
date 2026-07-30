@@ -21,16 +21,11 @@ SUITE(compress)
 void *random_buffer(size_t len)
 {
 	void *result = munit_malloc(len);
-	size_t offset = 0;
-	while (offset < len) {
-		ssize_t r = getrandom((char *)result + offset, len - offset, 0);
-		if (r < 0) {
-			if (errno == EINTR)
-				continue;  // retry
-			free(result);
-			return NULL;
-		}
-		offset += (size_t)r;
+	/* Synchronous uv_random() fills the whole buffer or fails, so no
+	 * partial-read/EINTR retry loop is needed. */
+	if (uv_random(NULL, NULL, result, len, 0, NULL) != 0) {
+		free(result);
+		return NULL;
 	}
 	return result;
 }

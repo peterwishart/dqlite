@@ -26,6 +26,7 @@
 #include <sys/time.h>
 #include <threads.h>
 #include <unistd.h>
+#include <uv.h>
 
 
 #include "../include/dqlite.h"
@@ -2539,12 +2540,15 @@ static int vfsRandomness(sqlite3_vfs *vfs, int nByte, char *zByte)
 {
 	(void)vfs;
 
-	ssize_t rv = getrandom(zByte, (size_t)nByte, 0);
-	if (rv == -1) {
+	/* Synchronous uv_random() (NULL loop/req/cb): fills the whole buffer
+	 * on success (returning 0) or returns a negative error, so there is
+	 * no partial-read case. xRandomness must return the number of bytes
+	 * of randomness actually obtained. */
+	if (uv_random(NULL, NULL, zByte, (size_t)nByte, 0, NULL) != 0) {
 		/* Ignore failed attempts */
 		return 0;
 	}
-	return (int)rv;
+	return nByte;
 }
 
 static int vfsSleep(sqlite3_vfs *vfs, int microseconds)
@@ -2563,11 +2567,13 @@ static int vfsCurrentTimeInt64(sqlite3_vfs *vfs, sqlite3_int64 *piNow)
 {
 	static const sqlite3_int64 unixEpoch =
 	    24405875 * (sqlite3_int64)8640000;
-	struct timeval now;
+	uv_timeval64_t now = {0};
 
 	(void)vfs;
 
-	gettimeofday(&now, 0);
+	/* Ignore errors, like the gettimeofday() call this replaces did;
+	 * SQLite only uses the current time for non-critical purposes. */
+	uv_gettimeofday(&now);
 	*piNow =
 	    unixEpoch + 1000 * (sqlite3_int64)now.tv_sec + now.tv_usec / 1000;
 	return SQLITE_OK;

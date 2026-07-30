@@ -635,18 +635,24 @@ static int uvRandom(struct raft_io *io, int min, int max)
 
 static void uvSeedRand(struct uv *uv)
 {
-	ssize_t sz = -1;
 	unsigned seed = 0; /* fed to srand() */
 
-	sz = getrandom(&seed, sizeof seed, GRND_NONBLOCK);
-	if (sz == -1 || sz < ((ssize_t)sizeof seed)) {
-		/* Fall back to an inferior random seed when `getrandom` would
-		 * have blocked or when not enough randomness was returned. */
+	/* Synchronous uv_random() (NULL loop/req/cb): fills the whole buffer
+	 * or returns a negative error. On Linux libuv uses getrandom(2) with
+	 * flags=0 (falling back to /dev/urandom), so unlike the previous
+	 * direct getrandom(GRND_NONBLOCK) call it blocks rather than failing
+	 * if the kernel entropy pool is not yet initialized. That difference
+	 * only matters in the first moments after boot and a 4-byte srand()
+	 * seed does not justify keeping a platform-specific call over it.
+	 * Keep the inferior time-based fallback for the error case. */
+	if (uv_random(NULL, NULL, &seed, sizeof seed, 0, NULL) != 0) {
+		/* Fall back to an inferior random seed when no system
+		 * randomness could be obtained. */
 		seed ^= (unsigned)uv->id;
 		seed ^= (unsigned)uv_now(uv->loop);
-		struct timeval time = {0};
+		uv_timeval64_t time = {0};
 		/* Ignore errors. */
-		gettimeofday(&time, NULL);
+		uv_gettimeofday(&time);
 		seed ^=
 		    (unsigned)((time.tv_sec * 1000) + (time.tv_usec / 1000));
 	}
