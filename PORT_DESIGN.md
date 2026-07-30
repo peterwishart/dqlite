@@ -102,3 +102,64 @@ sidestepping the AIO-contention flake seen under WSL2.)
 2. `raft-uv-unit-test` + `raft-uv-integration-test` with default backend (AIO)
    → must stay green (no regression).
 3. Same suites with `DQLITE_IO_BACKEND=threadpool` → proves the portable path.
+
+## Windows local transport ("@name"): two-tier upstreaming plan (S2)
+
+Scoping decision, 2026-07-30 (PORT_TODO.md §11.2 S2). The "Win → TCP loopback"
+row in the table above describes the *first-PR* posture only; this branch
+additionally carries a full named-pipe local transport, and the two are
+upstreamed in separate tiers.
+
+**Decision.**
+
+1. **The named-pipe transport stays on this branch.** It works — over pipes:
+   `cluster` 23/23, `membership` 5/5, `server` 8/8, `client` 6/6, `stress`
+   46/46 — and it was expensive to get right. Two non-obvious discoveries are
+   baked into it and must not be re-learned: (a) a **non-overlapped pipe makes
+   libuv burn one threadpool worker per read**, so a 5-node cluster (20
+   connections) exhausts the default 4-worker pool and deadlocks; the connect
+   side must open the pipe `FILE_FLAG_OVERLAPPED` so libuv drives it via IOCP
+   (PORT_TODO.md §7, rationale comment in `compat/win/dqlite_win_pipe.h:77-93`).
+   (b) libuv pipe listeners honor **`uv_pipe_pending_instances()` (default 4),
+   not the listen backlog**, so 32-64 concurrent connects fail with
+   `ERROR_PIPE_BUSY`; fixed with `uv_pipe_pending_instances(pipe, 128)` in
+   `dqliteNodeBindPipe` (PORT_TODO.md §9, `src/server.c:280-287`).
+2. **The first upstream Windows PR carries no pipe layer.** Prepare a variant
+   in which a Windows `@name` bind returns `DQLITE_MISUSE` (replace the
+   dispatch at `src/server.c:319-326` with an explicit rejection) and the tests
+   run over TCP loopback. The first PR then has none of the pipe layer's
+   timeout/EOF ambiguity (`DqliteWinPipeReadTimed` returns 0 for *both* EOF and
+   timeout) to argue about.
+3. **The pipe transport lands later as its own PR** with its own argument
+   (local IPC parity with the Linux abstract-namespace transport), carrying the
+   two discoveries above as its justification for the extra machinery.
+
+**Carve-out surface** (verified against the tree on 2026-07-30; every block is
+`#ifdef _WIN32`-guarded, so removal cannot touch the Linux build):
+
+| File | Lines | What to remove for the first PR |
+|---|---|---|
+| `compat/win/dqlite_win_pipe.h` | whole file (176 lines) | `DqliteWinPipeName` ("@name" → `\\.\pipe\dqlite-<name>`), `DqliteWinPipeWriteAll`, `DqliteWinPipeReadTimed` |
+| `src/server.c` | `:12` | `#include "dqlite_win_pipe.h"` |
+| `src/server.c` | `:234-303` | `dqliteNodeBindPipe` (function at `:245`; `uv_pipe_pending_instances(pipe, 128)` at `:287`) |
+| `src/server.c` | `:319-326` | the `address[0] == '@'` bind dispatch → becomes `return DQLITE_MISUSE` |
+| `src/server.c` | `:709-721` | `#elif defined(_WIN32)` peer-cred branch in `listenCb` (`GetNamedPipeClientProcessId`) |
+| `src/transport.c` | `:15-18`, `:79-86`, `:99-109`, `:142-148`, `:163-169` | pipe include (`:17`); `is_pipe` discriminator (`:85`); `DqliteWinPipeWriteAll` handshake/CONNECT writes (`:103`, `:144`); `is_pipe` error-path close (keep the `closesocket` arm) |
+| `src/transport.c` | `:195-203` | `is_pipe`-style close in `connect_after_work_cb` (keep the `closesocket` arm) |
+| `src/client/protocol.c` | `:16-19`, `:21-38`, `:154-188`, `:307-314`, `:460-468` | pipe include; `clientFdIsSocket` (`getsockopt(SO_TYPE)` discriminator, `:30-36`); pipe read branch (`DqliteWinPipeReadTimed` at `:176`); pipe write branch (`DqliteWinPipeWriteAll` at `:310`); pipe-vs-socket close (keep `closesocket`) |
+| `src/lib/transport.c` | `:82-159` | `uv_guess_handle(fd) == UV_NAMED_PIPE` → `uv_pipe_open` classification in `transport__stream` (keep only the `uv_tcp_open` arm for the SOCKET case) |
+| `test/lib/endpoint.c` | `:8-60`, `:94-108`, `:167-175`, `:187-192`, `:294-328` | pipe include + `endpointConnectPipe` (`DqliteWinPipeName` at `:30`); "@name" synthesis in setup (`:99`); listener/client teardown branches; `uv_pipe_bind` listener (`DqliteWinPipeName` at `:311`) |
+| `test/lib/server.c` | `:9`, `:11-58`, `:70-72`, `:117-120` | pipe include; `endpointConnectPipe` (`DqliteWinPipeName` at `:25`); the `'@'` dispatch in the Windows `endpointConnect` (keep its TCP body); `test_server_setup`'s `"@%u"` default address → synthesize a TCP loopback address instead |
+
+What **stays** (Windows, first PR — not pipe code, do not remove): the
+`UV_NAMED_PIPE` cases in `src/server.c`'s `listenCb` (`:667`, `:686`) and the
+`SO_PEERCRED`/`LOCAL_PEERPID` chain — upstream code, because libuv reports
+Linux `AF_UNIX` sockets as `UV_NAMED_PIPE`; all Winsock-only `_WIN32` blocks
+(`send`/`recv`/`WSAPoll`/`closesocket`/`accept`+`FIONBIO` in
+`src/client/protocol.c`, `src/transport.c`, `test/lib/endpoint.c:240`); and
+`test/lib/endpoint.c:69`'s TCP default in `getFamily()` — that default *is*
+the first-PR posture and already exists.
+
+Sanity check for the carve-out: after removal, grep for
+`DqliteWinPipe|dqliteNodeBindPipe|dqlite_win_pipe` must return nothing, and
+`UV_NAMED_PIPE` must survive only in `src/server.c`'s `listenCb`.
