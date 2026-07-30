@@ -467,9 +467,10 @@ equivalent exists; this is the largest task.
         `test/lib/server.c` `@ID`→TCP loopback, `test_node.c` setUp `@123`
         (~50 node tests fast-fail), raft-uv `ADDRINFO_TEST` tcp_connect×4/
         tcp_listen×6 + `invalidAddress`.
-- [~] `pthread_*` — done via Win32 shim (see §0).
-- [ ] `pthread_*` usage (`src/server.c`, threadpool) → libuv threads
-      (`uv_thread_t`, `uv_mutex_t`) or keep pthreads via a shim on Windows.
+- [x] `pthread_*` — initially done via Win32 shim; superseded by S1
+      (2026-07-30): all pthread/sem usage substituted with libuv primitives
+      (`uv_thread_t`, `uv_mutex_t`, `uv_cond_t`, `uv_sem_t`) and the shim
+      deleted. See §11.2 S1.
 
 ## 8. Misc portability
 
