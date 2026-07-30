@@ -344,8 +344,10 @@ static inline int accept4(int fd,
  * (buffered writes via the portable backend), so the alignment is not needed
  * for correctness here. We therefore map aligned_alloc() to plain malloc():
  * the free()/aligned-free contract holds and no heap bookkeeping mismatch is
- * possible. (The one test that asserts the returned alignment is skipped on
- * Windows.) Alignment argument is intentionally ignored.
+ * possible. Alignment argument is intentionally ignored. This relaxed,
+ * platform-dependent contract is documented at raft_aligned_alloc() in
+ * src/raft.h, and test/raft/integration/test_heap.c pins it (on Windows it
+ * asserts malloc's fundamental alignment instead of the requested one).
  *
  * Provided as a static inline function, NOT a function-like macro, so the raft
  * heap vtable member call `currentHeap->aligned_alloc(...)` is not mis-parsed. */

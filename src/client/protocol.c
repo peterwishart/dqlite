@@ -212,11 +212,23 @@ static ssize_t doRead(int fd,
 		}
 		rv = poll(&pfd, 1, (millis > INT_MAX) ? INT_MAX : (int)millis);
 		if (rv < 0) {
+#ifdef _WIN32
+			/* poll is WSAPoll here, and Winsock reports failures
+			 * via WSAGetLastError() WITHOUT setting errno, so the
+			 * POSIX errno==EINTR retry below would test a stale
+			 * value. No translated retry is needed either: Windows
+			 * has no signal interruption, so WSAPoll can never
+			 * fail with WSAEINTR (that code existed only for the
+			 * Winsock 1.1 WSACancelBlockingCall, long removed).
+			 * Any failure here is a real error. */
+			return -1;
+#else
 			if (errno == EINTR) {
 				continue;
 			} else {
 				return -1;
 			}
+#endif
 		} else if (rv == 0) {
 			/* Timeout */
 			break;
@@ -249,11 +261,18 @@ static ssize_t doRead(int fd,
 			 buf_len - (size_t)total);
 #endif
 		if (n < 0) {
+#ifdef _WIN32
+			/* recv() reports via WSAGetLastError(), not errno, and
+			 * WSAEINTR is unreachable (see the poll comment above):
+			 * fail rather than retry on a stale errno. */
+			return -1;
+#else
 			if (errno == EINTR) {
 				continue;
 			} else {
 				return -1;
 			}
+#endif
 		} else if (n == 0) {
 			/* EOF */
 			break;
@@ -319,11 +338,18 @@ static ssize_t doWrite(int fd,
 		}
 		rv = poll(&pfd, 1, (millis > INT_MAX) ? INT_MAX : (int)millis);
 		if (rv < 0) {
+#ifdef _WIN32
+			/* WSAPoll does not set errno and cannot fail with
+			 * WSAEINTR -- see the comment at the poll() call in
+			 * doRead(). Any failure is a real error. */
+			return -1;
+#else
 			if (errno == EINTR) {
 				continue;
 			} else {
 				return -1;
 			}
+#endif
 		} else if (rv == 0) {
 			/* Timeout */
 			break;
@@ -344,11 +370,18 @@ static ssize_t doWrite(int fd,
 			  buf_len - (size_t)total);
 #endif
 		if (n < 0) {
+#ifdef _WIN32
+			/* send() reports via WSAGetLastError(), not errno, and
+			 * WSAEINTR is unreachable (see the poll comment in
+			 * doRead()): fail rather than retry on a stale errno. */
+			return -1;
+#else
 			if (errno == EINTR) {
 				continue;
 			} else {
 				return -1;
 			}
+#endif
 		} else if (n == 0) {
 			/* EOF */
 			break;

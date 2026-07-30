@@ -1382,6 +1382,21 @@ DQLITE_VISIBLE_TO_TESTS void *raft_malloc(size_t size);
 DQLITE_VISIBLE_TO_TESTS void raft_free(void *ptr);
 DQLITE_VISIBLE_TO_TESTS void *raft_calloc(size_t nmemb, size_t size);
 DQLITE_VISIBLE_TO_TESTS void *raft_realloc(void *ptr, size_t size);
+
+/*
+ * Allocate a block of memory, requesting that it be aligned to `alignment`
+ * bytes.
+ *
+ * PLATFORM-DEPENDENT ALIGNMENT GUARANTEE: with the default heap, the request
+ * is honoured on POSIX platforms (C11 aligned_alloc()). On Windows the
+ * `alignment` argument is IGNORED and the block has only malloc's fundamental
+ * alignment: UCRT has no C11 aligned_alloc(), and _aligned_malloc() memory
+ * cannot be released with free(), which raft's aligned-alloc call sites do
+ * (see compat/win/dqlite_win_prelude.h). This is sound because raft only ever
+ * needs over-alignment for O_DIRECT I/O buffers, and direct I/O is never used
+ * on Windows (the portable buffered write path is). Callers must not rely on
+ * the requested alignment for anything other than O_DIRECT on Linux.
+ */
 DQLITE_VISIBLE_TO_TESTS void *raft_aligned_alloc(size_t alignment, size_t size);
 DQLITE_VISIBLE_TO_TESTS void raft_aligned_free(size_t alignment, void *ptr);
 
