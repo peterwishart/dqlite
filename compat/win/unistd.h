@@ -11,9 +11,9 @@
  * warnings via _CRT_NONSTDC_NO_WARNINGS (set in the CMake Windows defs). The
  * remaining calls that UCRT lacks under any name get thin wrappers here.
  *
- * NOTE: these are compile-enabling shims. Some (pread/pwrite, sysconf) are
- * best-effort and NOT semantically complete (e.g. pread here is not atomic
- * w.r.t. the file offset); genuine reimplementation is a later port iteration.
+ * NOTE: some of these are compile-enabling shims that are NOT semantically
+ * complete (e.g. sysconf answers exactly one question, mkstemp/mkdtemp are
+ * best-effort); see each function's comment for its precise contract.
  */
 #ifndef DQLITE_COMPAT_UNISTD_H
 #define DQLITE_COMPAT_UNISTD_H
@@ -181,23 +181,16 @@ static inline int getuid(void)
 	return 0;
 }
 
-/* pread / pwrite -- positional I/O. Best-effort seek+rw; NOT atomic w.r.t. the
- * shared file offset (a proper OVERLAPPED-based port comes later). */
-static inline ssize_t pread(int fd, void *buf, size_t count, long long offset)
-{
-	if (_lseeki64(fd, offset, SEEK_SET) < 0) {
-		return -1;
-	}
-	return (ssize_t)_read(fd, buf, (unsigned int)count);
-}
-
-static inline ssize_t pwrite(int fd, const void *buf, size_t count, long long offset)
-{
-	if (_lseeki64(fd, offset, SEEK_SET) < 0) {
-		return -1;
-	}
-	return (ssize_t)_write(fd, buf, (unsigned int)count);
-}
+/* pread / pwrite -- positional I/O, implemented in compat/win/compat_win.c on
+ * ReadFile/WriteFile with an OVERLAPPED offset (a single positional syscall,
+ * no seek+rw pair that a concurrent same-fd user could interleave with), and
+ * with the fd's file position saved/restored so it is not moved, matching
+ * POSIX. An earlier version was _lseeki64+_read/_write, which both mutated the
+ * shared offset and was two racy steps. The `offset` parameter is declared
+ * `long long` (not off_t): the UCRT's off_t is 32-bit (see the off_t notes in
+ * dqlite_win_prelude.h). */
+ssize_t pread(int fd, void *buf, size_t count, long long offset);
+ssize_t pwrite(int fd, const void *buf, size_t count, long long offset);
 
 /* strcasecmp -> UCRT _stricmp (src/query.c compares column type names). */
 #include <string.h>
@@ -213,15 +206,20 @@ static inline struct tm *gmtime_r(const time_t *timep, struct tm *result)
 	return gmtime_s(result, timep) == 0 ? result : NULL;
 }
 
-/* nanosleep -> Win32 Sleep (millisecond granularity); vfs.c uses it to back
- * off on WAL contention. */
-struct timespec_compat_guard;
-static inline int nanosleep_ms(long long ms)
-{
-	Sleep((DWORD)ms);
-	return 0;
-}
-#define nanosleep(req, rem) \
-	nanosleep_ms(((req)->tv_sec * 1000LL) + ((req)->tv_nsec / 1000000LL))
+/* nanosleep -> high-resolution waitable timer (implemented in
+ * compat/win/compat_win.c, see dqliteWinNanosleep there for the full story).
+ *
+ * The sole production caller is vfsSleep (src/vfs.c), SQLite's xSleep, which
+ * SQLite's WAL code drives with MICROSECOND backoffs (1us..~350us) while
+ * spinning on WAL-index lock contention. An earlier version of this shim
+ * truncated to whole milliseconds via Sleep(), turning every sub-ms request
+ * into Sleep(0) -- a yield, not a sleep -- so the backoff busy-spun under
+ * contention. The real function honours sub-millisecond durations.
+ *
+ * `rem` is ignored: Windows has no signal interruption, so the sleep never
+ * returns early and there is never a remainder to report (POSIX writes *rem
+ * only on EINTR). */
+int dqliteWinNanosleep(long long sec, long long nsec);
+#define nanosleep(req, rem) dqliteWinNanosleep((req)->tv_sec, (req)->tv_nsec)
 
 #endif /* DQLITE_COMPAT_UNISTD_H */

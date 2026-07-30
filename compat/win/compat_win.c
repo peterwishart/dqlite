@@ -14,6 +14,11 @@
  *               the library's public entry points (see the function comment).
  *  - fcntl():   implements NO command -- always fails with ENOSYS. See the
  *               function comment; no Windows-compiled code calls it.
+ *  - dqliteWinNanosleep(): sub-millisecond sleep on a high-resolution
+ *               waitable timer, backing the nanosleep() macro in unistd.h
+ *               (vfs.c's WAL-contention backoff needs microsecond sleeps).
+ *  - pread()/pwrite(): positional I/O via ReadFile/WriteFile with an
+ *               OVERLAPPED offset; does not disturb the fd's file position.
  *  - statfs()/fstatfs(): report a generic, tmpfs-like filesystem so the raft
  *               direct-I/O probe (uv_fs.c) concludes "not a direct-I/O capable
  *               fs" and falls back to the portable buffered write path.
@@ -30,14 +35,17 @@
 #include <windows.h>
 
 #include <errno.h>
+#include <limits.h> /* INT_MAX (pread/pwrite transfer cap) */
 #include <stdarg.h>
+#include <stdint.h> /* uintptr_t */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
-#include <fcntl.h> /* _O_RDWR, _O_BINARY (for _open_osfhandle) */
-#include <io.h>    /* _get_osfhandle, _open_osfhandle */
+#include <fcntl.h>  /* _O_RDWR, _O_BINARY (for _open_osfhandle) */
+#include <io.h>     /* _get_osfhandle, _open_osfhandle */
+#include <unistd.h> /* pread/pwrite/dqliteWinNanosleep prototypes (compat shim) */
 
 #include <sys/mman.h> /* PROT_*, MAP_*, mmap/munmap/msync/memfd_create protos */
 
@@ -130,6 +138,211 @@ int fcntl(int fd, int cmd, ...)
 	(void)cmd;
 	errno = ENOSYS;
 	return -1;
+}
+
+/* -------------------------------------------------------------- nanosleep */
+
+/* dqliteWinNanosleep(): the real function behind the nanosleep() macro in
+ * compat/win/unistd.h.
+ *
+ * The production caller is vfsSleep (src/vfs.c, SQLite's xSleep), which
+ * SQLite's WAL code calls with MICROSECOND durations (walTryBeginRead backs
+ * off 1us..~350us per retry while the WAL-index locks are contended). Plain
+ * Sleep() has millisecond granularity, so the previous ms-truncating shim
+ * turned every sub-ms request into Sleep(0): a scheduler yield, i.e. the
+ * "backoff" busy-spun under exactly the contention it was meant to relieve.
+ *
+ * Windows 10 1803+ provides high-resolution waitable timers
+ * (CreateWaitableTimerExW with CREATE_WAITABLE_TIMER_HIGH_RESOLUTION), which
+ * honour the requested 100ns-unit due time instead of rounding it up to the
+ * scheduler tick (15.6ms by default, 1ms at best via timeBeginPeriod). This is
+ * the same Windows 10 1803 floor as the placeholder mapping APIs that mmap()
+ * below already REQUIRES, so the flag is expected to be supported everywhere
+ * dqlite runs; should it not be (CreateWaitableTimerExW returns NULL), we
+ * retry without the flag and remember the downgrade, degrading to tick-quantum
+ * granularity -- a sleep of at least one scheduler tick, never a spin.
+ * If even the plain timer cannot be created, fall back to Sleep() with a
+ * documented 1ms minimum so a failed allocation still never yields a spin.
+ *
+ * The timer handle is created and closed PER CALL rather than cached
+ * per-thread. Measured on this port's dev machine (see PORT_TODO.md W7a), the
+ * create+set+wait+close cycle costs ~4-6us per call, which is (a) well under
+ * the ~0.5ms floor the high-resolution timer can actually deliver, so caching
+ * cannot improve the achieved sleep accuracy, and (b) negligible against even
+ * the smallest sub-ms sleep it enables. A thread-local cache would save those
+ * microseconds but leak one timer handle per exited thread (libuv threadpool
+ * workers, munit's forked children) unless paired with FlsAlloc destructor
+ * machinery -- complexity with no measurable benefit on this path. */
+int dqliteWinNanosleep(long long sec, long long nsec)
+{
+	/* Total duration in 100ns units, rounding any nonzero sub-100ns
+	 * remainder UP so a tiny-but-nonzero request still waits. */
+	long long units = sec * 10000000LL + (nsec + 99) / 100;
+	HANDLE timer;
+	LARGE_INTEGER due;
+	/* 0: undetermined; 1: high-resolution flag supported; -1: not. Races
+	 * between threads are benign (both sides write the same conclusion). */
+	static LONG hires_state;
+
+	if (units <= 0) {
+		return 0;
+	}
+
+	timer = NULL;
+	if (hires_state >= 0) {
+		timer = CreateWaitableTimerExW(
+		    NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+		    TIMER_ALL_ACCESS);
+		if (timer != NULL) {
+			hires_state = 1;
+		} else if (GetLastError() == ERROR_INVALID_PARAMETER) {
+			/* Pre-1803 kernel: the flag is unknown. Remember, so
+			 * later calls skip the doomed attempt. */
+			hires_state = -1;
+		}
+	}
+	if (timer == NULL) {
+		timer = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
+	}
+	if (timer == NULL) {
+		/* Out of handles/memory: degrade to Sleep(), which cannot
+		 * express sub-ms durations -- round UP to a 1ms minimum so
+		 * this fallback still sleeps rather than spins. */
+		Sleep((DWORD)((units + 9999) / 10000));
+		return 0;
+	}
+
+	due.QuadPart = -units; /* negative = relative time, 100ns units */
+	if (!SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE) ||
+	    WaitForSingleObject(timer, INFINITE) != WAIT_OBJECT_0) {
+		CloseHandle(timer);
+		Sleep((DWORD)((units + 9999) / 10000)); /* as above */
+		return 0;
+	}
+	CloseHandle(timer);
+	return 0;
+}
+
+/* ----------------------------------------------------------- pread/pwrite */
+
+/* Positional I/O on a CRT fd via ReadFile/WriteFile with an OVERLAPPED offset.
+ *
+ * The previous shim was _lseeki64+_read/_write: two steps that mutate the
+ * fd's shared file offset, so (unlike POSIX pread/pwrite) it was neither
+ * atomic against a concurrent same-fd user nor position-preserving. Every
+ * current caller is single-threaded per fd (audited for PORT_TODO.md W7b:
+ * dqlite_server_start's info/store fds are function-local; vfs.c's WAL-shm fd
+ * writes are serialized under the exclusive WAL write lock; the raft
+ * fallocate-emulation fd is owned by one threadpool worker; the
+ * test_compress.c fd is test-local), but that invariant was load-bearing and
+ * unstated. This implementation removes it: the offset travels IN the
+ * ReadFile/WriteFile call.
+ *
+ * One Windows wrinkle remains: on a handle opened for synchronous I/O (all
+ * CRT fds), ReadFile/WriteFile with an OVERLAPPED offset still ADVANCES the
+ * handle's file position after the transfer. POSIX pread/pwrite must not move
+ * it, so we save and restore the position around the call (the same approach
+ * libuv's uv_fs_read takes). The save/restore itself would race a concurrent
+ * same-fd seek/read -- true POSIX offset-invisibility for multithreaded fd
+ * sharing would need FILE_FLAG_OVERLAPPED handles end to end -- but the
+ * transfer itself is now positional either way.
+ *
+ * Note these are raw-byte transfers: no CRT text-mode CRLF translation is
+ * applied regardless of the fd's _O_TEXT/_O_BINARY mode (dqlite opens all
+ * pread/pwrite'd files binary; raw bytes are what its callers want). */
+
+/* Map a GetLastError() I/O failure onto the errno the POSIX callers test.
+ * ENOSPC matters: the raft fallocate emulation (src/raft/uv_os.c) reports
+ * -errno upward and its callers key on UV_ENOSPC for disk-full handling. */
+static int dqliteWinIoErrno(DWORD err)
+{
+	switch (err) {
+		case ERROR_INVALID_HANDLE:
+			return EBADF;
+		case ERROR_ACCESS_DENIED:
+			return EACCES;
+		case ERROR_DISK_FULL:
+		case ERROR_HANDLE_DISK_FULL:
+			return ENOSPC;
+		case ERROR_NOT_ENOUGH_MEMORY:
+			return ENOMEM;
+		default:
+			return EIO;
+	}
+}
+
+static ssize_t dqlitePositionalIo(int fd,
+				  void *buf,
+				  size_t count,
+				  long long offset,
+				  int is_read)
+{
+	HANDLE h = (HANDLE)_get_osfhandle(fd);
+	OVERLAPPED ov;
+	LARGE_INTEGER zero;
+	LARGE_INTEGER saved;
+	BOOL restore;
+	DWORD transferred = 0;
+	BOOL ok;
+	DWORD err;
+
+	if (h == INVALID_HANDLE_VALUE || h == NULL) {
+		errno = EBADF;
+		return -1;
+	}
+	if (offset < 0) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (count > (size_t)INT_MAX) {
+		/* POSIX allows a short transfer; keep the result well inside
+		 * ssize_t (matches the old _read()-based unsigned-int cap). */
+		count = (size_t)INT_MAX;
+	}
+
+	/* Save the file position: on a synchronous handle a positional
+	 * ReadFile/WriteFile still advances it (see the comment above).
+	 * Failure (e.g. a non-seekable handle) is not an error for the
+	 * transfer itself; we just cannot restore afterwards. */
+	zero.QuadPart = 0;
+	restore = SetFilePointerEx(h, zero, &saved, FILE_CURRENT);
+
+	memset(&ov, 0, sizeof ov);
+	ov.Offset = (DWORD)((unsigned long long)offset & 0xFFFFFFFFu);
+	ov.OffsetHigh = (DWORD)((unsigned long long)offset >> 32);
+	if (is_read) {
+		ok = ReadFile(h, buf, (DWORD)count, &transferred, &ov);
+	} else {
+		ok = WriteFile(h, buf, (DWORD)count, &transferred, &ov);
+	}
+	err = ok ? 0 : GetLastError();
+
+	if (restore) {
+		(void)SetFilePointerEx(h, saved, NULL, FILE_BEGIN);
+	}
+
+	if (!ok) {
+		if (is_read && err == ERROR_HANDLE_EOF) {
+			/* Reading at or past end-of-file: POSIX pread
+			 * reports 0, not an error. */
+			return 0;
+		}
+		errno = dqliteWinIoErrno(err);
+		return -1;
+	}
+	return (ssize_t)transferred;
+}
+
+ssize_t pread(int fd, void *buf, size_t count, long long offset)
+{
+	return dqlitePositionalIo(fd, buf, count, offset, 1);
+}
+
+ssize_t pwrite(int fd, const void *buf, size_t count, long long offset)
+{
+	/* Casting away const is safe: the is_read=0 path only passes buf to
+	 * WriteFile, which does not modify the source buffer. */
+	return dqlitePositionalIo(fd, (void *)(uintptr_t)buf, count, offset, 0);
 }
 
 /* ----------------------------------------------------------- statfs family */
