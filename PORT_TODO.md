@@ -1081,7 +1081,32 @@ item is done, not whether):
     `dqlite_static.lib` gets WER back. Re-run the socket suites (`conn`,
     `lib_addr`, `lib_transport`, `client`) to prove Winsock is still up.
 
-- [ ] **W9 — MINOR: misleading surface in `compat/win/`.**
+- [x] **W9 — MINOR: misleading surface in `compat/win/`.**
+      **DONE (2026-07-30), one commit** (post-S1 re-audit — S1 had already
+      deleted the threading shims). (1) Six dead headers deleted with
+      per-symbol grep proofs + fence/rebuild backstop: dirent.h, sys/uio.h,
+      netinet/tcp.h, dlfcn.h, libgen.h, sys/utsname.h; compat_win.c shed
+      uname() (~50 lines) and dead includes; a full live/dead map of the 18
+      surviving headers (all live, consumers named) is in the W9 agent
+      report/commit. compat/win now 18 files / 2352 lines (was 30/~3000 at
+      review time). (2) Stale "IMPLEMENTATION deferred" banners corrected in
+      ftw.h, sys/file.h, sys/statvfs.h, sys/socket.h, sys/vfs.h,
+      linux/magic.h, mkstemp, accept4. (3) Falsehoods: `getuid()`=0 KEPT,
+      labelled DELIBERATE FALSEHOOD naming its exact two test callers;
+      `uname()`="10.0" ELIMINATED (only caller kernel_version_above_equal
+      got a `_WIN32` false-stub — the semantically correct answer);
+      `sysconf(_SC_PAGESIZE)` now returns the TRUE dwPageSize (4KiB), the
+      64KiB unit moved to a named `dqlite_win_allocation_granularity()`
+      called only by `vfsGetMapSize()` — runtime values unchanged at every
+      site, names now match meanings, buffer.c and test mirrors collapsed to
+      upstream-verbatim sysconf lines. (4) test_uv_tcp_listen.c settle loop:
+      the item's evidence was stale (the IOCP-coalescing reason was already
+      in the macro comment); extended it to record that no test-visible
+      condition exists to wait on (partial-handshake state is private to
+      uv_tcp_listen.c), so the bounded poll loop stays. Verified: Windows
+      rebuild 0 warnings, unit 321/321, raft-uv-unit 20/20,
+      raft-uv-integration 212/212, server 8/8, stress 46/46; WSL unit
+      322/322, raft-uv-integration 237/237, stress 46/46.
   - **Verified evidence.** Dead-or-vestigial headers with declared-but-
     unimplemented symbols: `compat/win/dirent.h` (42 lines),
     `compat/win/sys/uio.h` (21), `compat/win/netinet/tcp.h` (13),
