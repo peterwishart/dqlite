@@ -978,7 +978,38 @@ item is done, not whether):
     and if a caller *can* retain it, gate the destroy or version the behaviour.
     Own commit, argued as a leak fix.
 
-- [ ] **W7 — MINOR: shim semantics that are quietly wrong.**
+- [x] **W7 — MINOR: shim semantics that are quietly wrong.**
+      **DONE (2026-07-30), two commits** (a+b compat shims; c+d shared-file
+      fixes). (a) `nanosleep` (the surviving sleep shim post-S1; `usleep` was
+      already deleted with zero consumers) no longer ms-truncates:
+      `dqliteWinNanosleep()` uses `CreateWaitableTimerExW` +
+      `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` (same Win10-1803 floor as W2's
+      placeholders), fallback plain timer → documented 1ms-min `Sleep`, never
+      a spin. Measured: 500µs request 0.13µs/call (yield/busy-spin) →
+      ~1.04ms (timer floor ~0.5ms); 1000µs 15.5ms→1.5ms. Per-call handle
+      (create+close ~1µs ≪ timer floor; TLS cache would leak per exited
+      thread). Stress wall-time unchanged (−0.5%, noise). (b) `pread`/`pwrite`
+      now truly positional: `ReadFile`/`WriteFile` + `OVERLAPPED` offset,
+      file position saved/restored (libuv's approach), `ERROR_HANDLE_EOF`→0,
+      ENOSPC mapped (fallocate emulation keys on it). Caller audit CONFIRMED
+      the old single-thread-per-fd invariant at all four sites (server.c,
+      vfs.c under the exclusive WAL write lock, uv_os.c worker-owned fd,
+      test_compress.c) — recorded in the commit. (c) The four
+      `errno == EINTR` checks after WSAPoll/recv/send in
+      src/client/protocol.c now fail fast under `_WIN32` with the
+      unreachability documented (Winsock doesn't set errno; WSAEINTR is
+      impossible without Winsock 1.1's WSACancelBlockingCall) — POSIX
+      branches token-identical. (d) Correction to this item: the alignment
+      test was NOT deleted — it survived with the assert `#ifndef _WIN32`-
+      guarded (asserting nothing on Windows). Now: relaxed contract
+      documented at `raft_aligned_alloc` (src/raft.h) + heap.c, and the
+      test's Windows branch pins `MEMORY_ALLOCATION_ALIGNMENT` (16); Linux
+      branch unchanged (full 1024-byte assert). Note: heap tests live in
+      raft-core-INTEGRATION, not -unit. Verified: Windows rebuild 0 warnings,
+      unit 321/321, raft-uv-unit 20/20, raft-uv-integration 212/212,
+      raft-core-unit 262/262, raft-core-integration 191/191, server 8/8,
+      stress 46/46; WSL unit 322/322, raft-core-integration 191/191;
+      clang -E -P token streams identical for all four shared files.
   - **(a) Sub-millisecond sleeps become busy-spins.**
     `compat/win/unistd.h:140-145` (`usleep`) and `:237-246` (`nanosleep`)
     truncate to whole milliseconds via `Sleep`, so any sub-ms request becomes

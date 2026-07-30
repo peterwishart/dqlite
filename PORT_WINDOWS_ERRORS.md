@@ -146,9 +146,12 @@ produce unresolved externals when linking is eventually attempted:
 - **mmap**: `mmap`/`munmap`/`memfd_create` → `CreateFileMapping`/`MapViewOfFile`
   (`src/vfs.c` WAL shmem). `MREMAP_MAYMOVE` intentionally left undefined so the
   portable no-mremap fallback is selected.
-- **Positional/async I/O**: `pread`/`pwrite` (non-atomic seek+rw),
-  `posix_fallocate` (grow-only `_chsize_s`), `ftruncate`→`_chsize_s`,
-  `fsync`→`_commit` are wired but need review.
+- **Positional/async I/O**: `pread`/`pwrite` (initially non-atomic seek+rw;
+  reimplemented under W7b as truly positional `ReadFile`/`WriteFile` with an
+  `OVERLAPPED` offset), `posix_fallocate` (grow-only, later
+  `SetFileInformationByHandle`, see W1), `ftruncate`→`_chsize_s`.
+  (`fsync`/`fdatasync` shims were deleted under S1 — all syncing goes through
+  `UvOsFsync`/`UvOsFdatasync` → libuv.)
 - **Directory ops**: `scandir`/`opendir`/`readdir` (`dirent.h`), `nftw`
   (`ftw.h`), `flock` (`sys/file.h`), `statfs`/`statvfs`, `mkdtemp`/`mkstemp`
   (best-effort, non-atomic) — all declared/best-effort only.
