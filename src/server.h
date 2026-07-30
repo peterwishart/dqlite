@@ -3,7 +3,6 @@
 
 #include <sqlite3.h>
 
-#include <semaphore.h>
 #include <uv.h>
 
 #include "client/protocol.h"
@@ -38,9 +37,9 @@ struct dqlite_node {
 	struct raft_uv_transport raft_transport; /* Raft libuv transport */
 	struct raft_io raft_io;                  /* libuv I/O */
 	struct raft_fsm raft_fsm;                /* dqlite FSM */
-	sem_t ready;                             /* Server is ready */
-	sem_t stopped;                           /* Notify loop stopped */
-	sem_t handover_done;
+	uv_sem_t ready;                          /* Server is ready */
+	uv_sem_t stopped;                        /* Notify loop stopped */
+	uv_sem_t handover_done;
 	queue queue; /* Incoming connections */
 	queue conns; /* Active connections */
 	queue roles_changes;

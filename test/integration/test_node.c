@@ -1,6 +1,7 @@
-#include <semaphore.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <unistd.h>
+#include <uv.h>
 #include "../lib/fs.h"
 #include "../lib/heap.h"
 #include "../lib/runner.h"
@@ -365,22 +366,31 @@ static int register_notify(sqlite3 *connection, char **pzErrMsg, struct sqlite3_
 					  NULL, NULL, NULL);
 }
 
-static sem_t write_sem;
+/* write_sem lets the test block until at least one write has started;
+ * write_count keeps a running total of started writes. The POSIX version
+ * peeked at the semaphore's value with sem_getvalue(), but uv_sem_t has no
+ * equivalent, so the count is tracked separately: it is incremented before
+ * every post, hence it is always >= the number of posts and exactly equals
+ * it once notify_transaction() has returned. */
+static uv_sem_t write_sem;
+static atomic_int write_count;
 static void notify_transaction(sqlite3_context *context, int argc, sqlite3_value **argv)
 {
 	(void)argc;
 	/* Just return the same value */
 	sqlite3_result_value(context, argv[0]);
 	/* Signal the application that we were able to get to the write part */
-	sem_post(&write_sem);
+	atomic_fetch_add(&write_count, 1);
+	uv_sem_post(&write_sem);
 }
 
 static void *setUpInflight(const MunitParameter params[], void *user_data)
 {
 	void *fixture = setUpInet(params, user_data);;
 
-	int rv = sem_init(&write_sem, 0, 0);
+	int rv = uv_sem_init(&write_sem, 0);
 	munit_assert_int(rv, ==, 0);
+	atomic_store(&write_count, 0);
 
 	rv = sqlite3_auto_extension((void (*)(void))register_notify);
 	munit_assert_int(rv, ==, SQLITE_OK);
@@ -393,8 +403,8 @@ static void tearDownInflight(void *data)
 	int rv = sqlite3_cancel_auto_extension((void (*)(void))notify_transaction);
 	munit_assert_int(rv, ==, SQLITE_OK);
 
-	rv = sem_destroy(&write_sem);
-	munit_assert_int(rv, ==, 0);
+	/* uv_sem_destroy() returns void; it aborts internally on failure. */
+	uv_sem_destroy(&write_sem);
 
 	tearDown(data);
 }
@@ -421,8 +431,9 @@ TEST(node, stopInflightWrites, setUpInflight, tearDownInflight, 0, node_params)
 	rv = clientRecvResult(&clients[0], NULL, NULL, NULL);
 	munit_assert_int(rv, ==, RAFT_OK);
 
-	rv = sem_getvalue(&write_sem, &started);
-	munit_assert_int(rv, ==, 0);
+	/* No INSERT has run yet, so no write can have started (the POSIX
+	 * version peeked at the semaphore value with sem_getvalue() here). */
+	started = atomic_load(&write_count);
 	munit_assert_int(started, ==, 0);
 
 	for (int i = 0; i < CLIENT_N; i++) {
@@ -431,16 +442,19 @@ TEST(node, stopInflightWrites, setUpInflight, tearDownInflight, 0, node_params)
 		munit_assert_int(rv, ==, RAFT_OK);
 	}
 
-	sem_wait(&write_sem);
+	uv_sem_wait(&write_sem);
 
 	/* Make sure the node can be closed */
 	rv = dqlite_node_stop(f->node);
 	munit_assert_int(rv, ==, 0);
 
-	rv = sem_getvalue(&write_sem, &started);
-	munit_assert_int(rv, ==, 0);
-	/* Check that some of the queries were still in flight */
-	munit_assert_int(started, <, CLIENT_N-1);
+	/* Check that some of the queries were still in flight. write_count
+	 * includes the write whose token uv_sem_wait() consumed above, so
+	 * "count < CLIENT_N" is the same condition the POSIX version expressed
+	 * as sem_getvalue() < CLIENT_N-1 (the semaphore value excluded the
+	 * consumed token). */
+	started = atomic_load(&write_count);
+	munit_assert_int(started, <, CLIENT_N);
 
 	for (int i = 0; i < CLIENT_N; i++) {
 		clientClose(&clients[i]);

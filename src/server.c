@@ -131,24 +131,24 @@ int dqlite__init(struct dqlite_node *d,
 	raft_set_max_catch_up_rounds(&d->raft, 100);
 	raft_set_max_catch_up_round_duration(&d->raft, 50 * 1000); /* 50 secs */
 	raft_register_state_cb(&d->raft, state_cb);
-	rv = sem_init(&d->ready, 0, 0);
+	rv = uv_sem_init(&d->ready, 0);
 	if (rv != 0) {
-		snprintf(d->errmsg, DQLITE_ERRMSG_BUF_SIZE, "sem_init(): %s",
-			 strerror(errno));
+		snprintf(d->errmsg, DQLITE_ERRMSG_BUF_SIZE, "uv_sem_init(): %s",
+			 uv_strerror(rv));
 		rv = DQLITE_ERROR;
 		goto err_after_raft_fsm_init;
 	}
-	rv = sem_init(&d->stopped, 0, 0);
+	rv = uv_sem_init(&d->stopped, 0);
 	if (rv != 0) {
-		snprintf(d->errmsg, DQLITE_ERRMSG_BUF_SIZE, "sem_init(): %s",
-			 strerror(errno));
+		snprintf(d->errmsg, DQLITE_ERRMSG_BUF_SIZE, "uv_sem_init(): %s",
+			 uv_strerror(rv));
 		rv = DQLITE_ERROR;
 		goto err_after_ready_init;
 	}
-	rv = sem_init(&d->handover_done, 0, 0);
+	rv = uv_sem_init(&d->handover_done, 0);
 	if (rv != 0) {
-		snprintf(d->errmsg, DQLITE_ERRMSG_BUF_SIZE, "sem_init(): %s",
-			 strerror(errno));
+		snprintf(d->errmsg, DQLITE_ERRMSG_BUF_SIZE, "uv_sem_init(): %s",
+			 uv_strerror(rv));
 		rv = DQLITE_ERROR;
 		goto err_after_stopped_init;
 	}
@@ -168,9 +168,9 @@ int dqlite__init(struct dqlite_node *d,
 	return 0;
 
 err_after_stopped_init:
-	sem_destroy(&d->stopped);
+	uv_sem_destroy(&d->stopped);
 err_after_ready_init:
-	sem_destroy(&d->ready);
+	uv_sem_destroy(&d->ready);
 err_after_raft_fsm_init:
 	fsm__close(&d->raft_fsm);
 err_after_raft_io_init:
@@ -189,17 +189,15 @@ err:
 
 void dqlite__close(struct dqlite_node *d)
 {
-	int rv;
 	if (!d->initialized) {
 		return;
 	}
 	raft_free(d->listener);
-	rv = sem_destroy(&d->stopped);
-	dqlite_assert(rv == 0); /* Fails only if sem object is not valid */
-	rv = sem_destroy(&d->ready);
-	dqlite_assert(rv == 0); /* Fails only if sem object is not valid */
-	rv = sem_destroy(&d->handover_done);
-	dqlite_assert(rv == 0);
+	/* uv_sem_destroy() returns void and aborts internally if the semaphore
+	 * object is not valid, so no result to assert on. */
+	uv_sem_destroy(&d->stopped);
+	uv_sem_destroy(&d->ready);
+	uv_sem_destroy(&d->handover_done);
 	fsm__close(&d->raft_fsm);
 	// TODO assert rv of uv_loop_close after fixing cleanup logic related to
 	// the TODO above referencing the cleanup logic without running the
@@ -580,7 +578,7 @@ static void destroy_conn(struct conn *conn)
 static void handoverDoneCb(struct dqlite_node *d, int status)
 {
 	d->handover_status = status;
-	sem_post(&d->handover_done);
+	uv_sem_post(&d->handover_done);
 }
 
 static void handoverCb(uv_async_t *handover)
@@ -636,10 +634,9 @@ static void stopCb(uv_async_t *stop)
 static void startup_cb(uv_timer_t *startup)
 {
 	struct dqlite_node *d = startup->data;
-	int rv;
 	d->running = true;
-	rv = sem_post(&d->ready);
-	dqlite_assert(rv == 0); /* No reason for which posting should fail */
+	/* uv_sem_post() returns void; it aborts internally on failure. */
+	uv_sem_post(&d->ready);
 }
 
 static void listenCb(uv_stream_t *listener, int status)
@@ -804,7 +801,7 @@ static int taskRun(struct dqlite_node *d)
 		snprintf(d->errmsg, DQLITE_ERRMSG_BUF_SIZE, "raft_start(): %s",
 			 raft_errmsg(&d->raft));
 		/* Unblock any client of taskReady */
-		sem_post(&d->ready);
+		uv_sem_post(&d->ready);
 		return rv;
 	}
 
@@ -812,8 +809,7 @@ static int taskRun(struct dqlite_node *d)
 	dqlite_assert(rv == 0);
 
 	/* Unblock any client of taskReady */
-	rv = sem_post(&d->ready);
-	dqlite_assert(rv == 0); /* no reason for which posting should fail */
+	uv_sem_post(&d->ready);
 
 	return 0;
 }
@@ -893,7 +889,7 @@ void dqlite_node_destroy(dqlite_node *d)
 static bool taskReady(struct dqlite_node *d)
 {
 	/* Wait for the ready semaphore */
-	sem_wait(&d->ready);
+	uv_sem_wait(&d->ready);
 	return d->running;
 }
 
@@ -983,7 +979,7 @@ int dqlite_node_handover(dqlite_node *d)
 	rv = uv_async_send(&d->handover);
 	dqlite_assert(rv == 0);
 
-	sem_wait(&d->handover_done);
+	uv_sem_wait(&d->handover_done);
 
 	return d->handover_status;
 }
