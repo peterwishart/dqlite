@@ -867,16 +867,14 @@ const char *dqlite_node_errmsg(dqlite_node *n)
 	return "node is NULL";
 }
 
-static void *taskStart(void *arg)
+static void taskStart(void *arg)
 {
 	struct dqlite_node *t = arg;
-	int rv;
-	rv = taskRun(t);
-	if (rv != 0) {
-		uintptr_t result = (uintptr_t)rv;
-		return (void *)result;
-	}
-	return NULL;
+	/* uv_thread_join() cannot collect a thread return value the way
+	 * pthread_join() did, so stash taskRun()'s result in the node object
+	 * instead; dqlite_node_stop() reads it back after joining us, which
+	 * makes the write visible without further synchronization. */
+	t->thread_ret = taskRun(t);
 }
 
 void dqlite_node_destroy(dqlite_node *d)
@@ -953,9 +951,9 @@ int dqlite_node_start(dqlite_node *t)
 		goto err_after_acquire_dir;
 	}
 
-	rv = pthread_create(&t->thread, 0, &taskStart, t);
+	rv = uv_thread_create(&t->thread, &taskStart, t);
 	if (rv != 0) {
-		tracef("pthread create failed %d", rv);
+		tracef("uv_thread_create failed %d", rv);
 		rv = DQLITE_ERROR;
 		goto err_after_acquire_dir;
 	}
@@ -993,7 +991,6 @@ int dqlite_node_handover(dqlite_node *d)
 int dqlite_node_stop(dqlite_node *d)
 {
 	tracef("dqlite node stop");
-	void *result;
 	int rv;
 
 	if (!d->running) {
@@ -1008,13 +1005,15 @@ int dqlite_node_stop(dqlite_node *d)
 	rv = uv_async_send(&d->stop);
 	dqlite_assert(rv == 0);
 
-	rv = pthread_join(d->thread, &result);
+	rv = uv_thread_join(&d->thread);
 	dqlite_assert(rv == 0);
 
 	release_dir(d->lock_fd);
 	d->lock_fd = -EBADF;
 
-	return (int)((uintptr_t)result);
+	/* The run loop thread's result, stashed by taskStart() before the
+	 * join above completed. */
+	return d->thread_ret;
 }
 
 int dqlite_node_recover(dqlite_node *n,
@@ -1605,9 +1604,9 @@ int dqlite_server_create(const char *path, dqlite_server **server)
 	dqliteWinSocketsInit();
 #endif
 	*server = callocChecked(1, sizeof **server);
-	rv = pthread_cond_init(&(*server)->cond, NULL);
+	rv = uv_cond_init(&(*server)->cond);
 	dqlite_assert(rv == 0);
-	rv = pthread_mutex_init(&(*server)->mutex, NULL);
+	rv = uv_mutex_init(&(*server)->mutex);
 	dqlite_assert(rv == 0);
 	(*server)->dir_path = strdupChecked(path);
 	(*server)->connect = transportDefaultConnect;
@@ -1843,39 +1842,31 @@ static int bootstrapOrJoinCluster(struct dqlite_server *server,
 	return 0;
 }
 
-static void *refreshTask(void *arg)
+static void refreshTask(void *arg)
 {
 	struct dqlite_server *server = arg;
 	struct client_context context;
-	struct timespec ts;
-	unsigned long long nsec;
 	int rv;
 
-	rv = pthread_mutex_lock(&server->mutex);
-	dqlite_assert(rv == 0);
+	uv_mutex_lock(&server->mutex);
 	for (;;) {
-		rv = clock_gettime(CLOCK_REALTIME, &ts);
-		dqlite_assert(rv == 0);
-		nsec = (unsigned long long)ts.tv_nsec;
-		nsec += server->refresh_period * 1000 * 1000;
-		while (nsec > 1000 * 1000 * 1000) {
-			nsec -= 1000 * 1000 * 1000;
-			ts.tv_sec += 1;
-		}
-		/* The type of tv_nsec is "an implementation-defined signed type
-		 * capable of holding [the range 0..=999,999,999]". int is the
-		 * narrowest such type (on all the targets we care about), so
-		 * cast to that before doing the assignment to avoid warnings.
-		 */
-		ts.tv_nsec = (int)nsec;
-
-		rv = pthread_cond_timedwait(&server->cond, &server->mutex, &ts);
+		/* Unlike pthread_cond_timedwait(), which takes an absolute
+		 * CLOCK_REALTIME deadline, uv_cond_timedwait() takes a
+		 * *relative* timeout in nanoseconds and measures it against a
+		 * monotonic clock. The old code recomputed a fresh absolute
+		 * deadline (now + refresh_period) on every loop iteration, so
+		 * the equivalent relative timeout is simply refresh_period;
+		 * there is no drift to accumulate. A wakeup with rv == 0 that
+		 * isn't a shutdown signal is spurious (or a stray signal);
+		 * exactly as before we just run the refresh early and then
+		 * wait for a full fresh period. */
+		rv = uv_cond_timedwait(&server->cond, &server->mutex,
+				       server->refresh_period * 1000 * 1000);
 		if (server->shutdown) {
-			rv = pthread_mutex_unlock(&server->mutex);
-			dqlite_assert(rv == 0);
+			uv_mutex_unlock(&server->mutex);
 			break;
 		}
-		dqlite_assert(rv == 0 || rv == ETIMEDOUT);
+		dqlite_assert(rv == 0 || rv == UV_ETIMEDOUT);
 
 		clientContextMillis(&context, 5000);
 		if (server->proto.fd == -1) {
@@ -1894,7 +1885,6 @@ static void *refreshTask(void *arg)
 		}
 		writeNodeStore(server);
 	}
-	return NULL;
 }
 
 int dqlite_server_start(dqlite_server *server)
@@ -2054,7 +2044,7 @@ int dqlite_server_start(dqlite_server *server)
 		goto err_after_start_node;
 	}
 
-	rv = pthread_create(&server->refresh_thread, NULL, refreshTask, server);
+	rv = uv_thread_create(&server->refresh_thread, refreshTask, server);
 	dqlite_assert(rv == 0);
 
 	close(store_fd);
@@ -2096,21 +2086,17 @@ int dqlite_server_handover(dqlite_server *server)
 
 int dqlite_server_stop(dqlite_server *server)
 {
-	void *ret;
 	int rv;
 
 	if (!server->started) {
 		return 1;
 	}
 
-	rv = pthread_mutex_lock(&server->mutex);
-	dqlite_assert(rv == 0);
+	uv_mutex_lock(&server->mutex);
 	server->shutdown = true;
-	rv = pthread_mutex_unlock(&server->mutex);
-	dqlite_assert(rv == 0);
-	rv = pthread_cond_signal(&server->cond);
-	dqlite_assert(rv == 0);
-	rv = pthread_join(server->refresh_thread, &ret);
+	uv_mutex_unlock(&server->mutex);
+	uv_cond_signal(&server->cond);
+	rv = uv_thread_join(&server->refresh_thread);
 	dqlite_assert(rv == 0);
 
 	emptyCache(&server->cache);
@@ -2127,8 +2113,8 @@ int dqlite_server_stop(dqlite_server *server)
 
 void dqlite_server_destroy(dqlite_server *server)
 {
-	pthread_cond_destroy(&server->cond);
-	pthread_mutex_destroy(&server->mutex);
+	uv_cond_destroy(&server->cond);
+	uv_mutex_destroy(&server->mutex);
 
 	emptyCache(&server->cache);
 

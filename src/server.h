@@ -4,6 +4,7 @@
 #include <sqlite3.h>
 
 #include <semaphore.h>
+#include <uv.h>
 
 #include "client/protocol.h"
 #include "config.h"
@@ -22,7 +23,13 @@ struct dqlite_node {
 	bool initialized; /* dqlite__init succeeded */
 
 	int lock_fd;                             /* Locked file in the data directory */
-	pthread_t thread;                        /* Main run loop thread. */
+	uv_thread_t thread;                      /* Main run loop thread. */
+	int thread_ret;                          /* Result of taskRun(), stashed by the run
+	                                          * loop thread because uv_thread_join() has
+	                                          * no result out-param (pthread_join did);
+	                                          * read by dqlite_node_stop() only after
+	                                          * joining, which is the synchronization
+	                                          * point. */
 	struct config config;                    /* Config values */
 	struct sqlite3_vfs vfs;                  /* In-memory VFS */
 	struct registry registry;                /* Databases */
@@ -67,9 +74,9 @@ struct node_store_cache {
 
 struct dqlite_server {
 	/* Threading stuff: */
-	pthread_cond_t cond;
-	pthread_mutex_t mutex;
-	pthread_t refresh_thread;
+	uv_cond_t cond;
+	uv_mutex_t mutex;
+	uv_thread_t refresh_thread;
 
 	/* These fields are protected by the mutex: */
 	bool shutdown;

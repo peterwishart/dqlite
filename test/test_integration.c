@@ -1,5 +1,5 @@
-#include <pthread.h>
 #include <time.h>
+#include <uv.h>
 
 #include "../include/dqlite.h"
 
@@ -23,10 +23,10 @@ struct worker
 	int i;			    /* Worker index */
 	int a;			    /* Start inserting from this number */
 	int n;			    /* Number of insertions to perform */
-	pthread_t thread;	   /* System thread we run in */
+	uv_thread_t thread;	   /* System thread we run in */
 };
 
-static void *__worker_run(void *arg)
+static void __worker_run(void *arg)
 {
 	struct worker *w;
 	char *leader;
@@ -88,8 +88,6 @@ static void *__worker_run(void *arg)
 		test_client_rows_close(&rows);
 		test_client_finalize(w->client, db_id, stmt_id);
 	}
-
-	return 0;
 }
 
 static void __worker_start(struct worker *w,
@@ -106,22 +104,21 @@ static void __worker_start(struct worker *w,
 
 	test_server_connect(server, &w->client);
 
-	err = pthread_create(&w->thread, 0, &__worker_run, (void *)w);
+	err = uv_thread_create(&w->thread, &__worker_run, (void *)w);
 	if (err) {
 		munit_errorf("failed to spawn test worker thread: %s",
-			     strerror(errno));
+			     uv_strerror(err));
 	}
 }
 
 static void __worker_wait(struct worker *w)
 {
 	int err;
-	void *retval;
 
-	err = pthread_join(w->thread, &retval);
+	err = uv_thread_join(&w->thread);
 	if (err) {
 		munit_errorf("failed to wait test worker thread: %s",
-			     strerror(errno));
+			     uv_strerror(err));
 	}
 
 	test_client_close(w->client);
