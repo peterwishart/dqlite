@@ -1293,3 +1293,40 @@ warnings catch substitution mistakes, then re-audit what is left of W7/W9.
       the review's point stands that in-tree design docs belong in the PR
       description, so the upstream series must either drop them or convert the
       six `see PORT_DESIGN.md` comments into self-contained prose.)
+
+### 11.4 Follow-ups surfaced while executing §11 (2026-07-30)
+
+- [ ] **Investigate the two pre-existing test-environment failures** that the
+      §11 work repeatedly had to route around (both reproduced at baseline
+      commits, so they are NOT regressions from §11 — but each is either a
+      real bug or a blind spot in coverage):
+      - **Windows: the full unfiltered `integration-test.exe` hangs at
+        `node/stopInflightReads`** on this machine (first recorded during W1,
+        cf. §9's ASan-build hang — now seen on the normal build too). Every
+        §11 verification ran the integration suites individually to avoid it,
+        which means the `node` suite as a whole is effectively unverified on
+        Windows. Needs its own root-cause investigation: reproduce under a
+        debugger, determine whether it is a product bug (stop-with-inflight-
+        reads deadlock), a test-harness issue, or machine-specific.
+      - **Linux/WSL: the `membership` (0/5) and `client` (~2/6) integration
+        suites fail environmentally in `test_server_prepare` —
+        `dqlite_node_set_bind_address` returns 1** (verified identical at
+        HEAD before any §11 change; `server`, `cluster`, `stress`, `node`
+        subsets all pass in the same environment). Diagnose what those two
+        fixtures' addresses need that this WSL setup refuses (abstract-socket
+        namespace? address family?), so WSL remains a trustworthy Linux
+        verification environment for this branch — right now those two suites
+        are a blind spot in every WSL run.
+
+- [ ] **Decide the release-build fate of the three I/O-downgrade env switches
+      (flagged for maintainers in W6c, deliberately not decided
+      unilaterally).** `DQLITE_IO_BACKEND=threadpool`, `DQLITE_IO_NO_DIRECT`
+      and `DQLITE_VFS_NO_MREMAP` now warn once on stderr when honoured (W6c),
+      but they still work in every build. The open question for upstream
+      review: gate them behind a build option that is ON for test/CI builds
+      and OFF for release, or keep them always-available with the warning as
+      the only guard. Arguments both ways: they are the branch's anti-bit-rot
+      lever (Linux CI exercises the portable Windows code paths through
+      them), but an env var that silently changes a production binary's write
+      mechanism is an operational footgun even with a warning. Raise in the
+      first upstream PR that carries the switches rather than deciding here.
