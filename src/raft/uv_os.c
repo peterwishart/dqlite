@@ -12,7 +12,12 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#ifndef _WIN32
+/* Vestigial: nothing in this file calls basename()/dirname() any more. Kept
+ * (guarded) so the Linux preprocessed output is unchanged; Windows has no
+ * <libgen.h> and needs none. */
 #include <libgen.h>
+#endif
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>

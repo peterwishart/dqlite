@@ -1,9 +1,12 @@
 /*
  * dqlite Windows port -- <linux/magic.h> minimal shim.
  *
- * src/raft/uv_fs.c includes this for filesystem-type magic numbers used by the
- * Linux direct-I/O probe. That probe is compiled out / unused on the portable
- * (threadpool) write path, so the constants only need to exist. Windows ONLY.
+ * Filesystem-type magic numbers. Includers: src/raft/uv_fs.c (inside its
+ * HAVE_XFS_XFS_H block, never compiled on Windows) and
+ * test/raft/integration/test_uv_init.c, which compares statfs() f_type against
+ * TMPFS_MAGIC at runtime -- and matches, because the compat statfs()
+ * (compat_win.c) reports TMPFS_MAGIC. The other constants only need to exist.
+ * Windows ONLY.
  */
 #ifndef DQLITE_COMPAT_LINUX_MAGIC_H
 #define DQLITE_COMPAT_LINUX_MAGIC_H

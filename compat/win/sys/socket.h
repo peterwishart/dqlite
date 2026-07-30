@@ -3,8 +3,10 @@
  *
  * Pulls in the Winsock2 sockets API (already parsed by the forced-include
  * prelude) and declares the POSIX bits Winsock spells differently. Windows
- * ONLY (compat/win/). Genuine WSAStartup lifecycle + AF_UNIX/TCP transport
- * porting is a later iteration; this shim only makes the headers resolve.
+ * ONLY (compat/win/). WSAStartup is handled structurally by
+ * dqliteWinSocketsInit() (compat_win.c, called from the library's public
+ * object-creation entry points), and the TCP transport is ported and running
+ * on top of these names; this header itself only maps spelling.
  */
 #ifndef DQLITE_COMPAT_SYS_SOCKET_H
 #define DQLITE_COMPAT_SYS_SOCKET_H

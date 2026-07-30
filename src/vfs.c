@@ -107,7 +107,19 @@ const int vfsOne = 1;
  */
 static size_t vfsGetMapSize(void)
 {
+#ifdef _WIN32
+	/* On Windows the constraint is not the CPU page size but the 64KiB
+	 * allocation granularity: both the file offset and the fixed base
+	 * address of a MapViewOfFile3 view must be multiples of it (see mmap()
+	 * in compat/win/compat_win.c). Ask for that unit by name -- with the
+	 * same effect as a 64KiB-page system below: each mapping covers two
+	 * 32KiB regions and every mapping offset/base is 64KiB-aligned. Do NOT
+	 * use sysconf(_SC_PAGESIZE) here: it reports the true 4KiB page size,
+	 * which would produce 32KiB mappings at unmappable 32KiB offsets. */
+	const int os_page_size = (int)dqlite_win_allocation_granularity();
+#else
 	const int os_page_size = (int)sysconf(_SC_PAGESIZE);
+#endif
 	/* Page size must be a power of 2 */
 	PRE(((os_page_size - 1) & os_page_size) == 0);
 

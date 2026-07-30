@@ -177,9 +177,19 @@ static void tearDown(void *data)
 /* On Windows the accept and handshake-read IOCP completions can coalesce into a
  * single loop iteration, after which a bare uv_run(UV_RUN_ONCE) would block
  * forever on the otherwise-idle-but-active listener (there is no further event
- * to wake it). Drive the loop non-blocking with a short settle delay instead;
- * this reliably processes the peer's already-sent handshake data without the
- * risk of an indefinite block. */
+ * to wake it) -- so the Linux LOOP_RUN(1) below cannot be used. Drive the loop
+ * non-blocking with a short settle delay instead.
+ *
+ * This is a fixed settle loop rather than a condition-driven wait because
+ * there is nothing for the test to poll: the state being awaited (the
+ * transport's internal incoming-connection bookkeeping after the connect, or
+ * a PARTIAL handshake read) is private to uv_tcp_listen.c and by design fires
+ * no test-visible callback -- acceptCb only runs after a COMPLETE handshake,
+ * and the tests that use these macros exercise exactly the
+ * not-yet-fully-handshaken states. The loop is bounded (~50ms) and
+ * non-blocking, so it can neither hang nor mask a missing event: the
+ * assertions and LOOP_RUN_UNTIL waits that follow still fail if the expected
+ * processing never happened. */
 #define LOOP_RUN_UNTIL_CONNECTED                     \
     do {                                             \
         int _k;                                      \

@@ -320,8 +320,8 @@ void dqliteWinSocketsInit(void);
  * Declared in the prelude (not <sys/socket.h>) because those callers use it
  * without including that header. The SOCKET result is narrowed to int to match
  * the POSIX fd-typed callers; INVALID_SOCKET maps to -1 so their `< 0` error
- * checks still work. Full SOCKET/fd plumbing is part of the deferred socket
- * reimplementation. */
+ * checks still work (the narrowing is safe in practice: Windows socket
+ * handles fit in 32 bits even though the SOCKET type is pointer-sized). */
 static inline int accept4(int fd,
 			  struct sockaddr *addr,
 			  socklen_t *addrlen,
@@ -429,37 +429,6 @@ static inline void qsort_r(void *base,
 #ifndef strtok_r
 #define strtok_r(str, delim, saveptr) strtok_s((str), (delim), (saveptr))
 #endif
-
-/* strverscmp (GNU): version-aware string compare. Only used by
- * test/raft/unit/test_uv_fs.c to compare kernel-release strings. This is a
- * compact implementation sufficient for dotted numeric version strings (it
- * compares digit runs by magnitude): it is NOT a byte-exact clone of glibc's
- * leading-zero/fraction handling, which those version strings never exercise. */
-#include <ctype.h>
-static inline int strverscmp(const char *s1, const char *s2)
-{
-	const unsigned char *a = (const unsigned char *)s1;
-	const unsigned char *b = (const unsigned char *)s2;
-	while (*a != '\0' && *a == *b) {
-		a++;
-		b++;
-	}
-	if (isdigit(*a) && isdigit(*b)) {
-		const unsigned char *ea = a;
-		const unsigned char *eb = b;
-		while (isdigit(*ea)) {
-			ea++;
-		}
-		while (isdigit(*eb)) {
-			eb++;
-		}
-		/* Longer digit run (no leading zeros) => larger number. */
-		if ((ea - a) != (eb - b)) {
-			return (int)((ea - a) - (eb - b));
-		}
-	}
-	return (int)*a - (int)*b;
-}
 
 /* ---- posix_fadvise: advisory, safe no-op --------------------------------
  * src/raft/uv_fs.c hints sequential access. Windows has no equivalent syscall

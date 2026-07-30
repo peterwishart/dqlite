@@ -2,8 +2,9 @@
  * dqlite Windows port -- <ftw.h> minimal shim (nftw).
  *
  * Test-only (test/lib/fs.c, test/raft/lib/dir.c use nftw to recursively remove
- * a directory tree). Declarations + flag constants only; IMPLEMENTATION
- * deferred to a later iteration. Windows ONLY (compat/win/).
+ * a directory tree). Declarations + flag constants here; the implementation --
+ * a real FindFirstFile/FindNextFile recursive walk honouring FTW_DEPTH and
+ * FTW_PHYS -- lives in compat/win/compat_win.c. Windows ONLY (compat/win/).
  */
 #ifndef DQLITE_COMPAT_FTW_H
 #define DQLITE_COMPAT_FTW_H

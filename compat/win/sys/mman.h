@@ -12,9 +12,11 @@
  * macOS/Windows path described in PORT_DESIGN.md. Windows ONLY (compat/win/).
  *
  * Alignment contract: MapViewOfFile3 requires the target base address AND the
- * file offset to be multiples of the 64KiB allocation granularity. vfs.c derives
- * both from sysconf(_SC_PAGESIZE), which compat/win/unistd.h reports as the
- * allocation granularity, so every vfs mapping is 64KiB-aligned and satisfiable.
+ * file offset to be multiples of the 64KiB allocation granularity. vfs.c's
+ * vfsGetMapSize() derives both from dqlite_win_allocation_granularity()
+ * (compat/win/unistd.h) on Windows, so every vfs mapping is 64KiB-aligned and
+ * satisfiable. (sysconf(_SC_PAGESIZE) reports the true 4KiB page size and is
+ * NOT usable for this.)
  */
 #ifndef DQLITE_COMPAT_SYS_MMAN_H
 #define DQLITE_COMPAT_SYS_MMAN_H

@@ -70,15 +70,7 @@ TEST_CASE(init, n_pages, NULL)
 	struct fixture *f = data;
 	(void)params;
 	ASSERT_N_PAGES(1);
-#ifdef _WIN32
-	/* buffer.c uses the true CPU page size (dwPageSize, 4KiB) on Windows,
-	 * not sysconf(_SC_PAGESIZE) which the compat layer reports as the 64KiB
-	 * allocation granularity (needed for WAL-index mmap alignment). Mirror
-	 * buffer__init's source of truth. */
-	munit_assert_long(f->buffer.page_size, ==, dqlite_win_page_size());
-#else
 	munit_assert_long(f->buffer.page_size, ==, sysconf(_SC_PAGESIZE));
-#endif
 	return MUNIT_OK;
 }
 

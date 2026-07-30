@@ -1,9 +1,9 @@
 /*
  * dqlite Windows port -- <sys/file.h> minimal shim (flock).
  *
- * src/server.c uses flock() to lock the data-directory lock file. Win32 uses
- * LockFileEx; declaration + LOCK_* constants only here, IMPLEMENTATION
- * deferred. Windows ONLY (compat/win/).
+ * src/server.c uses flock() to lock the data-directory lock file. Declaration
+ * + LOCK_* constants here; the implementation (LockFileEx/UnlockFileEx on the
+ * fd's OS handle) lives in compat/win/compat_win.c. Windows ONLY (compat/win/).
  */
 #ifndef DQLITE_COMPAT_SYS_FILE_H
 #define DQLITE_COMPAT_SYS_FILE_H

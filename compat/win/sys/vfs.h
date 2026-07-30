@@ -1,11 +1,13 @@
 /*
  * dqlite Windows port -- <sys/vfs.h> minimal shim (statfs).
  *
- * src/raft/uv_fs.c and uv_os.c use `struct statfs` + fstatfs() to probe the
- * filesystem type for the Linux direct-I/O decision. That probe is Linux
- * semantics; on Windows the portable threadpool write path is used instead
- * (see PORT_DESIGN.md), so this shim only needs to let the code COMPILE.
- * A real capability probe / compile-out is a later iteration. Windows ONLY.
+ * Consumers: src/raft/uv_fs.c's direct-I/O probe compiles against this but
+ * early-returns "no direct I/O" on Windows before calling fstatfs();
+ * src/raft/uv_os.c's UvOsFallocateEmulation calls fstatfs() for f_bsize; and
+ * test/raft/integration/test_uv_init.c calls statfs() and compares f_type.
+ * The implementation (compat/win/compat_win.c) reports a generic tmpfs-like
+ * filesystem (TMPFS_MAGIC, 4KiB f_bsize), values those callers key off.
+ * Windows ONLY.
  */
 #ifndef DQLITE_COMPAT_SYS_VFS_H
 #define DQLITE_COMPAT_SYS_VFS_H

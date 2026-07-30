@@ -6,8 +6,7 @@
  * (guarded on _WIN32 and wired into the build via an if(WIN32) static library
  * `dqlite_win_compat` -- see CMakeLists.txt). No non-Windows build sees this
  * file. Prototypes match the shim headers in compat/win/ (ftw.h, sys/vfs.h,
- * sys/statvfs.h, sys/utsname.h) and the fcntl() declaration in the forced
- * prelude.
+ * sys/statvfs.h) and the fcntl() declaration in the forced prelude.
  *
  * Behavioural summary:
  *  - dqliteWinSocketsInit(): idempotent process-wide WSAStartup, called from
@@ -27,7 +26,6 @@
  *  - nftw():    a real recursive directory walk honouring FTW_DEPTH (post-order)
  *               and FTW_PHYS (don't descend into reparse points), used by the
  *               test teardown to remove a temp tree.
- *  - uname():   fill struct utsname with reasonable Windows values.
  */
 
 #ifdef _WIN32
@@ -36,7 +34,6 @@
 
 #include <errno.h>
 #include <limits.h> /* INT_MAX (pread/pwrite transfer cap) */
-#include <stdarg.h>
 #include <stdint.h> /* uintptr_t */
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,7 +49,6 @@
 #include <ftw.h>
 #include <sys/file.h>
 #include <sys/statvfs.h>
-#include <sys/utsname.h>
 #include <sys/vfs.h>
 
 /* --------------------------------------------------------------- Winsock */
@@ -522,56 +518,6 @@ int nftw(const char *dirpath,
 	return nftwWalk(dirpath, fn, flags, 0);
 }
 
-/* ------------------------------------------------------------------ uname */
-
-int uname(struct utsname *buf)
-{
-	DWORD len;
-	SYSTEM_INFO si;
-
-	if (buf == NULL) {
-		errno = EFAULT;
-		return -1;
-	}
-	memset(buf, 0, sizeof *buf);
-
-	(void)snprintf(buf->sysname, sizeof buf->sysname, "%s", "Windows");
-
-	len = sizeof buf->nodename - 1;
-	if (!GetComputerNameA(buf->nodename, &len)) {
-		(void)snprintf(buf->nodename, sizeof buf->nodename, "%s",
-			       "localhost");
-	}
-
-	/* release/version: a plausible, high version string. Callers compare it
-	 * with strverscmp() against Linux kernel minimums, so any modern-looking
-	 * dotted number compares "greater". */
-	(void)snprintf(buf->release, sizeof buf->release, "%s", "10.0");
-	(void)snprintf(buf->version, sizeof buf->version, "%s", "Windows");
-
-	GetNativeSystemInfo(&si);
-	switch (si.wProcessorArchitecture) {
-		case PROCESSOR_ARCHITECTURE_AMD64:
-			(void)snprintf(buf->machine, sizeof buf->machine, "%s",
-				       "x86_64");
-			break;
-		case PROCESSOR_ARCHITECTURE_ARM64:
-			(void)snprintf(buf->machine, sizeof buf->machine, "%s",
-				       "aarch64");
-			break;
-		case PROCESSOR_ARCHITECTURE_INTEL:
-			(void)snprintf(buf->machine, sizeof buf->machine, "%s",
-				       "x86");
-			break;
-		default:
-			(void)snprintf(buf->machine, sizeof buf->machine, "%s",
-				       "unknown");
-			break;
-	}
-
-	return 0;
-}
-
 /* -------------------------------------------------------------------- flock */
 
 /* flock(fd, op): advisory whole-file lock via LockFileEx/UnlockFileEx on the
@@ -628,13 +574,13 @@ int flock(int fd, int operation)
  * "unmap + map-at-fixed-address" path (MREMAP_MAYMOVE is left undefined in
  * compat/win/sys/mman.h). This is the Win32 backing for that path.
  *
- * Alignment: MapViewOfFileEx requires the target base address AND the file
- * offset to both be multiples of the allocation granularity (64KiB). vfs.c
- * derives its mapping size and offsets from sysconf(_SC_PAGESIZE), which the
- * compat layer reports as dwAllocationGranularity (64KiB) -- see
- * compat/win/unistd.h. Consequently every mmap offset is 64KiB-aligned, and
- * every MAP_FIXED target is a base returned by an earlier mmap (which
- * MapViewOfFile always granularity-aligns), so MapViewOfFileEx can honour them.
+ * Alignment: MapViewOfFile3 requires the target base address AND the file
+ * offset to both be multiples of the allocation granularity (64KiB). vfs.c's
+ * vfsGetMapSize() derives its mapping size and offsets on Windows from
+ * dqlite_win_allocation_granularity() (compat/win/unistd.h). Consequently
+ * every mmap offset is 64KiB-aligned, and every MAP_FIXED target is a base
+ * returned by an earlier mmap (which the mapping APIs always
+ * granularity-align), so the mapping calls can honour them.
  *
  * The section is created per-call from the file's current size (dwMaximumSize
  * 0). vfs.c ftruncate()s the file large enough before each mmap, and the

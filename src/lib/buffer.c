@@ -14,18 +14,7 @@
 
 int buffer__init(struct buffer *b)
 {
-#ifdef _WIN32
-	/* On Windows sysconf(_SC_PAGESIZE) is shimmed to the allocation
-	 * granularity (64KiB) because vfs.c needs that for WAL mmap alignment.
-	 * buffer.c instead wants the true memory page size (4KiB): page_size is
-	 * the query row-batch flush threshold in query__batch(), and a 64KiB
-	 * threshold changes the observable pause/resume boundary versus Linux
-	 * (small result sets that pause on Linux would complete in a single
-	 * batch). Use the genuine page size so batching matches Linux. */
-	b->page_size = dqlite_win_page_size();
-#else
 	b->page_size = (unsigned)sysconf(_SC_PAGESIZE);
-#endif
 	b->n_pages = 1;
 	b->data = malloc(SIZE(b));
 	if (b->data == NULL) {

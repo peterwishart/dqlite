@@ -1543,15 +1543,7 @@ TEST_CASE(query, one_row, NULL)
  * and an 8B EOF marker. */
 static unsigned max_rows_buffer(unsigned tuple_row_sz)
 {
-#ifdef _WIN32
-	/* The gateway's row batch flushes at buffer__init's page_size, which on
-	 * Windows is the true 4KiB CPU page size (dqlite_win_page_size()), not
-	 * sysconf(_SC_PAGESIZE) (== 64KiB allocation granularity on Win32). Use
-	 * the same value so the expected rows-per-response matches. */
-	unsigned buf_sz = dqlite_win_page_size();
-#else
 	unsigned buf_sz = sysconf(_SC_PAGESIZE);
-#endif
 	unsigned eof_sz = 8;
 	return (buf_sz - eof_sz) / tuple_row_sz;
 }

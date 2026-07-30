@@ -1,4 +1,6 @@
+#ifndef _WIN32
 #include <sys/utsname.h>
+#endif
 #include <unistd.h>
 
 #include "../../../src/raft/uv_fs.h"
@@ -33,6 +35,19 @@
         munit_assert_string_equal(_errmsg, ERRMSG); \
     }
 
+#ifdef _WIN32
+/* There is no Linux kernel release to compare on Windows. The one caller
+ * (UvFsProbeCapabilities/tmpfs below) uses this to decide whether a Linux
+ * >= 6.8 tmpfs supports O_DIRECT; the Windows answer to "is direct I/O
+ * expected?" is always no (probeDirectIO in src/raft/uv_fs.c reports it
+ * unavailable unconditionally), so answer false. Note the tmpfs test only
+ * runs at all if RAFT_TMP_TMPFS is set, which is a Linux-tmpfs concept. */
+static bool kernel_version_above_equal(const char *min)
+{
+    (void)min;
+    return false;
+}
+#else
 static bool kernel_version_above_equal(const char *min)
 {
     struct utsname kernel_info;
@@ -40,6 +55,7 @@ static bool kernel_version_above_equal(const char *min)
     munit_assert_int(rv, ==, 0);
     return strverscmp(kernel_info.release, min) >= 0;
 }
+#endif
 
 SUITE(UvFsCheckDir)
 

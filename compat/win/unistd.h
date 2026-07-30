@@ -62,26 +62,20 @@ typedef unsigned short mode_t;
 #include <windows.h>
 #endif
 
-/* sysconf(_SC_PAGESIZE) -- dqlite queries the page size in buffer.c / vfs.c.
+/* sysconf(_SC_PAGESIZE) -- the TRUE CPU memory page size (dwPageSize, 4KiB),
+ * exactly what POSIX sysconf reports. The only Windows-compiled caller is
+ * src/lib/buffer.c (buffer__init), which uses it as the query row-batch flush
+ * threshold in query__batch() and therefore must see the same 4KiB value as
+ * Linux (plus the test mirrors of that math in test/unit/lib/test_buffer.c
+ * and test/unit/test_gateway.c).
  *
- * We deliberately report dwAllocationGranularity (64KiB on Win32), NOT
- * dwPageSize (4KiB). vfs.c's WAL shared-memory maps 32KiB regions at offsets
- * that are multiples of vfsGetMapSize() == sysconf(_SC_PAGESIZE), and it also
- * remaps regions in place at addresses that are multiples of that value. On
- * Windows BOTH the file offset passed to MapViewOfFileEx and the fixed base
- * address it is mapped at must be multiples of the *allocation granularity*
- * (64KiB), not the page size. Reporting 64KiB makes vfsGetMapSize() return
- * 64KiB, so each mapping covers two 32KiB regions and every mmap offset/base is
- * 64KiB-aligned -- exactly what MapViewOfFileEx requires.
- *
- * CAUTION: this coarse value is ONLY correct for the vfs.c mmap-alignment use.
- * buffer.c uses page_size as its query row-batch flush threshold (see
- * query__batch), where 64KiB vs the true 4KiB changes the observable
- * pause/resume boundary and broke concurrency/delete tests -- so buffer__init
- * now takes the genuine page size from dqlite_win_page_size() below, NOT this
- * shim. Do not route any size-of-a-page (as opposed to allocation-granularity)
- * use through sysconf() on Windows.
- */
+ * HISTORY / CAUTION: an earlier version of this shim lied and returned
+ * dwAllocationGranularity (64KiB) because src/vfs.c needs that value for
+ * WAL-index mmap alignment. That lie leaked into buffer.c's flush threshold
+ * and changed the observable query pause/resume boundary (bug #10 in
+ * PORT_TODO.md, concurrency/delete failures). sysconf now tells the truth;
+ * code that needs the mapping-alignment unit must ask for it by name via
+ * dqlite_win_allocation_granularity() below. */
 #define _SC_PAGESIZE 1
 #define _SC_PAGE_SIZE _SC_PAGESIZE
 
@@ -90,21 +84,25 @@ static inline long sysconf(int name)
 	SYSTEM_INFO si;
 	if (name == _SC_PAGESIZE) {
 		GetSystemInfo(&si);
-		return (long)si.dwAllocationGranularity;
+		return (long)si.dwPageSize;
 	}
 	return -1;
 }
 
-/* True CPU memory page size (dwPageSize, 4KiB), distinct from the allocation
- * granularity reported by sysconf(_SC_PAGESIZE) above. Callers that need the
- * genuine page size -- e.g. buffer.c, which uses it as the query row-batch
- * flush threshold in query__batch() and must therefore match the Linux 4KiB
- * value, not the 64KiB mmap-alignment unit vfs.c needs -- use this instead. */
-static inline unsigned dqlite_win_page_size(void)
+/* Win32 allocation granularity (dwAllocationGranularity, 64KiB): the unit that
+ * BOTH the file offset passed to MapViewOfFile3 and the fixed base address a
+ * view is (re)mapped at must be a multiple of. The only caller is
+ * vfsGetMapSize() (src/vfs.c), which sizes the WAL-index shm mappings with it
+ * so that each 64KiB mapping covers two 32KiB regions and every mmap
+ * offset/base the vfs uses is granularity-aligned -- exactly what the mapping
+ * APIs backing compat_win.c's mmap() require. This is deliberately NOT what
+ * sysconf(_SC_PAGESIZE) returns (see above): the granularity is a
+ * mapping-alignment unit, not the size of a memory page. */
+static inline unsigned dqlite_win_allocation_granularity(void)
 {
 	SYSTEM_INFO si;
 	GetSystemInfo(&si);
-	return (unsigned)si.dwPageSize;
+	return (unsigned)si.dwAllocationGranularity;
 }
 
 /* ftruncate -> grow-or-shrink a file to `length`.
@@ -144,8 +142,11 @@ static inline unsigned int sleep(unsigned int seconds)
 	return 0;
 }
 
-/* mkstemp: create+open a unique temp file from a "XXXXXX" template. Best-effort
- * (uses _mktemp_s + _open); a robust O_EXCL port comes later. */
+/* mkstemp: create+open a unique temp file from a "XXXXXX" template. The open
+ * IS O_EXCL, so it never silently reuses an existing file; best-effort only in
+ * that a losing race with a concurrent creator of the same name fails instead
+ * of retrying with a new name the way POSIX mkstemp does (_mktemp_s picks the
+ * name in a separate step). Adequate for the tests' temp-file setup. */
 static inline int mkstemp(char *template_)
 {
 	if (_mktemp_s(template_, strlen(template_) + 1) != 0) {
@@ -171,11 +172,14 @@ static inline char *mkdtemp(char *template_)
 	return template_;
 }
 
-/* getuid: Windows has no POSIX uid. The only callers (raft uv_fs / uv_load
- * tests) test `getuid() == 0` to skip permission-denied checks when running
- * as root. Return 0 ("root") so those Windows-inapplicable EACCES tests are
- * skipped rather than run with POSIX permission semantics that do not apply
- * here. */
+/* getuid: Windows has no POSIX uid. DELIBERATE FALSEHOOD, returns 0 ("root").
+ * The only two callers are tests that check `getuid() == 0` to skip
+ * permission-denied (EACCES) scenarios when running as root:
+ *   - test/raft/unit/test_uv_fs.c, UvFsProbeCapabilities/noAccess
+ *   - test/raft/integration/test_uv_load.c, load/openSegmentWithNoAccessPermission
+ * Those scenarios rely on POSIX execute/read permission bits that chmod-style
+ * calls cannot enforce on Windows, so "pretend root" makes exactly those two
+ * tests skip. Any future caller wanting a real identity must NOT use this. */
 static inline int getuid(void)
 {
 	return 0;

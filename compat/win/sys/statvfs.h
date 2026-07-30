@@ -1,8 +1,10 @@
 /*
  * dqlite Windows port -- <sys/statvfs.h> minimal shim.
  *
- * struct statvfs + statvfs()/fstatvfs() declarations so includers compile; the
- * Win32 backing (GetDiskFreeSpaceEx) is a later iteration. Windows ONLY.
+ * struct statvfs + statvfs()/fstatvfs() declarations; implemented in
+ * compat/win/compat_win.c via GetDiskFreeSpaceEx, with the reported free space
+ * deliberately CAPPED so the raft DirFill() test helper never tries to fill a
+ * real volume (see DQLITE_STATVFS_CAP_BYTES there). Windows ONLY.
  */
 #ifndef DQLITE_COMPAT_SYS_STATVFS_H
 #define DQLITE_COMPAT_SYS_STATVFS_H
