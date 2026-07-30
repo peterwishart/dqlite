@@ -1,7 +1,6 @@
 #include "server.h"
 
 #include <errno.h>
-#include <sched.h>
 #include <stdlib.h>
 #include <sys/file.h>
 #include <sys/un.h>

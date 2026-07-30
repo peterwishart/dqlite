@@ -136,24 +136,8 @@ static inline int ftruncate(int fd, long long length)
 	return _chsize_s(fd, length) == 0 ? 0 : -1;
 }
 
-/* fsync / fdatasync -> _commit (flush to disk). */
-static inline int fsync(int fd)
-{
-	return _commit(fd);
-}
-
-static inline int fdatasync(int fd)
-{
-	return _commit(fd);
-}
-
-/* usleep / sleep -> Win32 Sleep (millisecond granularity). */
-static inline int usleep(unsigned int usec)
-{
-	Sleep((DWORD)(usec / 1000));
-	return 0;
-}
-
+/* sleep -> Win32 Sleep (millisecond granularity). Only tests call it (1s
+ * waits); production code sleeps via nanosleep below or libuv timers. */
 static inline unsigned int sleep(unsigned int seconds)
 {
 	Sleep((DWORD)(seconds * 1000));
@@ -187,17 +171,12 @@ static inline char *mkdtemp(char *template_)
 	return template_;
 }
 
-/* getuid / geteuid: Windows has no POSIX uid. The only callers (raft uv_fs /
- * uv_load tests) test `getuid() == 0` to skip permission-denied checks when
- * running as root. Return 0 ("root") so those Windows-inapplicable EACCES
- * tests are skipped rather than run with POSIX permission semantics that do
- * not apply here. */
+/* getuid: Windows has no POSIX uid. The only callers (raft uv_fs / uv_load
+ * tests) test `getuid() == 0` to skip permission-denied checks when running
+ * as root. Return 0 ("root") so those Windows-inapplicable EACCES tests are
+ * skipped rather than run with POSIX permission semantics that do not apply
+ * here. */
 static inline int getuid(void)
-{
-	return 0;
-}
-
-static inline int geteuid(void)
 {
 	return 0;
 }
@@ -220,28 +199,18 @@ static inline ssize_t pwrite(int fd, const void *buf, size_t count, long long of
 	return (ssize_t)_write(fd, buf, (unsigned int)count);
 }
 
-/* strcasecmp / strncasecmp -> UCRT _stricmp / _strnicmp. */
+/* strcasecmp -> UCRT _stricmp (src/query.c compares column type names). */
 #include <string.h>
 static inline int strcasecmp(const char *a, const char *b)
 {
 	return _stricmp(a, b);
 }
 
-static inline int strncasecmp(const char *a, const char *b, size_t n)
-{
-	return _strnicmp(a, b, n);
-}
-
-/* POSIX reentrant time helpers -> UCRT *_s forms (tracing.c uses gmtime_r). */
+/* POSIX reentrant time helper -> UCRT *_s form (tracing.c uses gmtime_r). */
 #include <time.h>
 static inline struct tm *gmtime_r(const time_t *timep, struct tm *result)
 {
 	return gmtime_s(result, timep) == 0 ? result : NULL;
-}
-
-static inline struct tm *localtime_r(const time_t *timep, struct tm *result)
-{
-	return localtime_s(result, timep) == 0 ? result : NULL;
 }
 
 /* nanosleep -> Win32 Sleep (millisecond granularity); vfs.c uses it to back

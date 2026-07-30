@@ -3,16 +3,14 @@
 #endif
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 /* UNVERIFIED-NEEDS-MAC: macOS analog of _GNU_SOURCE. Exposes the BSD
- * <sys/mman.h> (MAP_ANON) and <sys/random.h> feature set that _GNU_SOURCE
- * turns on for glibc. Guarded so Linux and Windows preprocessed output is
- * unchanged. */
+ * <sys/mman.h> (MAP_ANON) feature set that _GNU_SOURCE turns on for glibc.
+ * Guarded so Linux and Windows preprocessed output is unchanged. */
 # define _DARWIN_C_SOURCE
 #endif
 
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <pthread.h>
 #include <sqlite3.h>
 #include <stdatomic.h>
 #include <stddef.h>
@@ -21,9 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/random.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <threads.h>
 #include <unistd.h>
 #include <uv.h>

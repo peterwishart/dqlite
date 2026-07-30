@@ -169,12 +169,12 @@ elseif(WIN32)
   # succeeds and deps resolve, but a full build will not yet compile/link.
   list(APPEND DQLITE_PLATFORM_DEFS _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
   # POSIX-compat shim layer (compat/win): silence the UCRT deprecation of the
-  # POSIX I/O aliases (read/write/close/...) and the legacy Winsock names, and
-  # enable rand_s (backs the <sys/random.h> shim). Windows-only; see
-  # compat/win/*.h and the WIN32 branch of dqlite_common_flags() below.
+  # POSIX I/O aliases (read/write/close/...) and the legacy Winsock names.
+  # Windows-only; see compat/win/*.h and the WIN32 branch of
+  # dqlite_common_flags() below.
   list(APPEND DQLITE_PLATFORM_DEFS
     _CRT_NONSTDC_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE
-    _WINSOCK_DEPRECATED_NO_WARNINGS _CRT_RAND_S)
+    _WINSOCK_DEPRECATED_NO_WARNINGS)
 
 else()
   message(FATAL_ERROR "Unsupported platform: ${CMAKE_SYSTEM_NAME}")

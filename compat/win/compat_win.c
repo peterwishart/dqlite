@@ -30,23 +30,18 @@
 #include <windows.h>
 
 #include <errno.h>
-#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
-#include <fcntl.h>   /* _O_RDWR, _O_BINARY (for _open_osfhandle) */
-#include <io.h>      /* _get_osfhandle, _open_osfhandle */
-#include <process.h> /* _beginthreadex */
-#include <time.h>    /* struct timespec */
+#include <fcntl.h> /* _O_RDWR, _O_BINARY (for _open_osfhandle) */
+#include <io.h>    /* _get_osfhandle, _open_osfhandle */
 
 #include <sys/mman.h> /* PROT_*, MAP_*, mmap/munmap/msync/memfd_create protos */
 
 #include <ftw.h>
-#include <pthread.h>
-#include <semaphore.h>
 #include <sys/file.h>
 #include <sys/statvfs.h>
 #include <sys/utsname.h>
@@ -361,232 +356,6 @@ int uname(struct utsname *buf)
 			break;
 	}
 
-	return 0;
-}
-
-/* ============================================================ threads / sync
- *
- * Minimal POSIX threading/synchronisation implemented on Win32 primitives, just
- * enough for the symbols src/server.{c,h}, src/lib/threadpool.c and the test
- * harness reference. Only the referenced surface is implemented.
- *
- * Type mapping (see compat/win/{pthread,semaphore}.h):
- *  - pthread_mutex_t { void *handle }  -> an SRWLOCK stored INLINE in `handle`.
- *    An SRWLOCK is a single pointer-sized opaque field, so the void* slot holds
- *    it directly; InitializeSRWLock simply zeroes it. Using SRWLOCK (not
- *    CRITICAL_SECTION) lets it pair with a CONDITION_VARIABLE.
- *  - pthread_cond_t  { void *handle }  -> a CONDITION_VARIABLE stored INLINE the
- *    same way, driven by SleepConditionVariableSRW / WakeConditionVariable.
- *  - sem_t { void *handle; long count } -> a Win32 semaphore HANDLE plus a
- *    self-maintained count for sem_getvalue().
- *
- * All functions follow the POSIX convention: return 0 on success, a positive
- * errno-style code on failure.
- */
-
-/* ------------------------------------------------------------ pthread_mutex */
-
-int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
-{
-	(void)attr; /* default attributes only */
-	InitializeSRWLock((PSRWLOCK)&mutex->handle);
-	return 0;
-}
-
-int pthread_mutex_destroy(pthread_mutex_t *mutex)
-{
-	/* SRWLOCKs need no teardown. */
-	(void)mutex;
-	return 0;
-}
-
-int pthread_mutex_lock(pthread_mutex_t *mutex)
-{
-	AcquireSRWLockExclusive((PSRWLOCK)&mutex->handle);
-	return 0;
-}
-
-int pthread_mutex_unlock(pthread_mutex_t *mutex)
-{
-	ReleaseSRWLockExclusive((PSRWLOCK)&mutex->handle);
-	return 0;
-}
-
-/* ------------------------------------------------------------- pthread_cond */
-
-int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr)
-{
-	(void)attr;
-	InitializeConditionVariable((PCONDITION_VARIABLE)&cond->handle);
-	return 0;
-}
-
-int pthread_cond_destroy(pthread_cond_t *cond)
-{
-	/* CONDITION_VARIABLEs need no teardown. */
-	(void)cond;
-	return 0;
-}
-
-int pthread_cond_signal(pthread_cond_t *cond)
-{
-	WakeConditionVariable((PCONDITION_VARIABLE)&cond->handle);
-	return 0;
-}
-
-/* pthread_cond_timedwait: abstime is an absolute CLOCK_REALTIME (Unix epoch)
- * deadline. Win32 wants a relative millisecond timeout, so convert against the
- * current wall-clock time (GetSystemTimeAsFileTime, also Unix-epoch based once
- * the 1601->1970 offset is removed). Returns 0 when signalled, ETIMEDOUT on
- * timeout, matching the callers' expectations in src/server.c. */
-int pthread_cond_timedwait(pthread_cond_t *cond,
-			   pthread_mutex_t *mutex,
-			   const struct timespec *abstime)
-{
-	/* 100ns ticks between 1601-01-01 and 1970-01-01. */
-	static const unsigned long long EPOCH_DELTA = 116444736000000000ULL;
-	FILETIME ft;
-	unsigned long long now_ms;
-	unsigned long long abs_ms;
-	DWORD wait_ms;
-
-	GetSystemTimeAsFileTime(&ft);
-	now_ms = ((unsigned long long)ft.dwHighDateTime << 32) |
-		 ft.dwLowDateTime;
-	now_ms = (now_ms - EPOCH_DELTA) / 10000ULL; /* 100ns -> ms */
-
-	abs_ms = (unsigned long long)abstime->tv_sec * 1000ULL +
-		 (unsigned long long)abstime->tv_nsec / 1000000ULL;
-
-	wait_ms = abs_ms > now_ms ? (DWORD)(abs_ms - now_ms) : 0;
-
-	if (SleepConditionVariableSRW((PCONDITION_VARIABLE)&cond->handle,
-				      (PSRWLOCK)&mutex->handle, wait_ms, 0)) {
-		return 0;
-	}
-	if (GetLastError() == ERROR_TIMEOUT) {
-		return ETIMEDOUT;
-	}
-	return EINVAL;
-}
-
-/* ----------------------------------------------------------- pthread_create */
-
-/* Heap-allocated control block bridging the POSIX start routine (void *(*)(void
- * *)) to the Win32 thread proc (unsigned __stdcall). Also holds the join handle
- * and the routine's return value so pthread_join can hand it back. The block's
- * address is what pthread_t carries. */
-struct dqliteWinThread {
-	HANDLE handle;
-	void *(*start)(void *);
-	void *arg;
-	void *ret;
-};
-
-static unsigned __stdcall dqliteWinThreadTrampoline(void *p)
-{
-	struct dqliteWinThread *t = p;
-	t->ret = t->start(t->arg);
-	return 0;
-}
-
-int pthread_create(pthread_t *thread,
-		   const pthread_attr_t *attr,
-		   void *(*start_routine)(void *),
-		   void *arg)
-{
-	struct dqliteWinThread *t;
-	uintptr_t h;
-
-	(void)attr; /* default attributes only */
-
-	t = malloc(sizeof *t);
-	if (t == NULL) {
-		return ENOMEM;
-	}
-	t->start = start_routine;
-	t->arg = arg;
-	t->ret = NULL;
-
-	h = _beginthreadex(NULL, 0, dqliteWinThreadTrampoline, t, 0, NULL);
-	if (h == 0) {
-		int rv = errno;
-		free(t);
-		return rv != 0 ? rv : EAGAIN;
-	}
-	t->handle = (HANDLE)h;
-	*thread = (pthread_t)(uintptr_t)t;
-	return 0;
-}
-
-int pthread_join(pthread_t thread, void **retval)
-{
-	struct dqliteWinThread *t = (struct dqliteWinThread *)(uintptr_t)thread;
-
-	if (t == NULL) {
-		return EINVAL;
-	}
-	WaitForSingleObject(t->handle, INFINITE);
-	if (retval != NULL) {
-		*retval = t->ret;
-	}
-	CloseHandle(t->handle);
-	free(t);
-	return 0;
-}
-
-/* ---------------------------------------------------------------- semaphore */
-
-int sem_init(sem_t *sem, int pshared, unsigned int value)
-{
-	(void)pshared; /* no cross-process semaphores needed */
-	sem->handle = CreateSemaphoreA(NULL, (LONG)value, LONG_MAX, NULL);
-	if (sem->handle == NULL) {
-		errno = ENOSPC;
-		return -1;
-	}
-	sem->count = (long)value;
-	return 0;
-}
-
-int sem_destroy(sem_t *sem)
-{
-	if (sem->handle != NULL) {
-		CloseHandle((HANDLE)sem->handle);
-		sem->handle = NULL;
-	}
-	return 0;
-}
-
-int sem_post(sem_t *sem)
-{
-	/* Bump the mirror before releasing so a woken waiter never observes a
-	 * count that is too low. */
-	InterlockedIncrement(&sem->count);
-	if (!ReleaseSemaphore((HANDLE)sem->handle, 1, NULL)) {
-		InterlockedDecrement(&sem->count);
-		errno = EOVERFLOW;
-		return -1;
-	}
-	return 0;
-}
-
-int sem_wait(sem_t *sem)
-{
-	if (WaitForSingleObject((HANDLE)sem->handle, INFINITE) != WAIT_OBJECT_0) {
-		errno = EINVAL;
-		return -1;
-	}
-	InterlockedDecrement(&sem->count);
-	return 0;
-}
-
-/* sem_getvalue: Win32 exposes no way to read a semaphore's count, so return the
- * mirror we maintain. POSIX allows returning 0 (rather than a negative waiter
- * count) when threads are blocked, which is exactly what the mirror yields. */
-int sem_getvalue(sem_t *sem, int *sval)
-{
-	*sval = (int)sem->count;
 	return 0;
 }
 

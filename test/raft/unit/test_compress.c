@@ -9,7 +9,6 @@
 #include <linux/limits.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <sys/random.h>
 #include <uv.h>
 
 #ifdef LZ4_AVAILABLE

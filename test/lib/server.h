@@ -3,7 +3,6 @@
 #ifndef TEST_SERVER_H
 #define TEST_SERVER_H
 
-#include <pthread.h>
 #include <sys/un.h>
 
 #include "../../src/client/protocol.h"
