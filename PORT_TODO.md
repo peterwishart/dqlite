@@ -1087,8 +1087,36 @@ W3, W7a and W9; do it after the cages are in place so the newly-enabled
 warnings catch substitution mistakes, then re-audit what is left of W7/W9.
 **S2 is a scoping decision, not a code change on this branch.**
 
-- [ ] **S1 — Shrink the compat layer by adopting Fork A's libuv-substitution
-      strategy.** *The review's headline recommendation: the forced-include
+- [x] **S1 — Shrink the compat layer by adopting Fork A's libuv-substitution
+      strategy.**
+      **DONE (2026-07-30), four commits** (one per primitive family + the
+      deletion sweep), each verified with full suites on BOTH platforms
+      (Windows: unit 321, raft-uv-unit 20, raft-uv-int 212, server 8,
+      cluster 23, stress 46; WSL: unit 322, raft-uv-unit 25, raft-core-unit
+      262, raft-uv-int 237, server 8, stress 46):
+      (1) pthread→uv (thread/mutex/cond). Non-mechanical corners:
+      thread-return values (uv_thread_join has no out-param → taskRun result
+      stashed in the node, read after join) and `pthread_cond_timedwait`
+      (absolute REALTIME) → `uv_cond_timedwait` (relative ns, monotonic) —
+      refreshTask recomputed its deadline per iteration so the relative form
+      is drift-free. (2) sem→uv_sem; `sem_getvalue` (no uv equivalent) in
+      test_node.c replaced by an atomic post-counter with the off-by-one
+      (consumed token) mapped exactly. (3) getrandom→uv_random,
+      gettimeofday→uv_gettimeofday; the GRND_NONBLOCK "don't block on
+      entropy" nuance documented at the seed site (uv_random blocks
+      pre-entropy-init; only affects first moments after boot, 4-byte
+      non-crypto srand seed — judged acceptable, fallback kept for real
+      errors). (4) Deleted compat/win/{pthread,semaphore,sched,sys/random,
+      sys/time}.h + compat_win.c's ~225-line threads/sync section + six
+      zero-consumer unistd.h symbols + the `_CRT_RAND_S` define:
+      **29 files/2937 lines → 24 files/2447 lines**. sys/time.h went too —
+      munit's <sys/time.h> includes are psnip-clock GETTIMEOFDAY/GETRUSAGE
+      branches that _WIN32 never selects (proven via ninja dep DB). The
+      threadpool.c `<uv/unix.h>` guard + shadow-stub deletion landed earlier
+      in W3. Caveats: `uv_cond_timedwait` clock-domain checked as the item
+      asked; W7a (sub-ms sleep) remains open — vfs.c's backoff is nanosleep,
+      still ms-truncated in compat unistd.h. WSL-only pre-existing
+      membership/client env failures documented in the family-1 commit. *The review's headline recommendation: the forced-include
       prelude that fakes `<unistd.h>`/`<pthread.h>` for ~50k lines is the port's
       biggest ongoing liability, and libuv (already a hard dependency) provides
       portable threads, semaphores, mutexes, fs ops and randomness.*
