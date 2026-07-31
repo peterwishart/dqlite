@@ -424,11 +424,13 @@ TEST(UvWriterClose, aio, setUp, tearDownDeps, 0, DirAioParams)
     SKIP_IF_NO_FIXTURE;
     /* Cancellation-on-close only happens for requests sitting on the AIO
      * backend's poll queue, i.e. submitted via the non-blocking (async)
-     * path. With the portable backend forced, or with async I/O unavailable
-     * (e.g. DQLITE_IO_NO_DIRECT set), the write instead runs blocking in the
-     * threadpool, is drained on close and completes with status 0. (Close
-     * before skipping: tearDownDeps does not close the writer.) */
-    if (uvThreadpoolBackend() || !f->async_io) {
+     * path. With the portable backend forced there is no such queue: the
+     * write runs blocking in the threadpool, is drained on close and
+     * completes with status 0. (Close before skipping: tearDownDeps does
+     * not close the writer.) As upstream, no async_io guard: DirAioParams
+     * dirs promise working NOWAIT, so a false probe there is a bug this
+     * test should surface, not skip. */
+    if (uvThreadpoolBackend()) {
         CLOSE;
         return MUNIT_SKIP;
     }

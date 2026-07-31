@@ -1549,13 +1549,18 @@ Audit headline: `Makefile.am`/`configure.ac`/`.github/` are byte-identical to
 upstream, no test deleted, promotion-tie + `stress/read_write_heavy` tests are
 net additions. One marginal drop, several gaps.
 
-- [ ] **T1 — Undo the one real automake coverage drop.**
-      `test/raft/unit/test_uv_writer.c:431` (`UvWriterClose/aio`) added
-      `|| !f->async_io` to the skip; upstream ran the `RAFT_CANCELED`
-      assertion on `DirAioParams` filesystems that probe `async_io == false`
-      (tmpfs/ZFS via `RAFT_TMP_*`). Re-examine why it was added and narrow the
-      skip back to `uvThreadpoolBackend()` only, or record the precise reason
-      it cannot run.
+- [x] **T1 — Undo the one real automake coverage drop. DONE 2026-07-31.**
+      Root cause: the `|| !f->async_io` guard (added in W6a for the
+      `DQLITE_IO_NO_DIRECT` lever) converted upstream's loud failure on a
+      violated `DirAioParams` contract into a silent skip — masking exactly
+      the probe/backend-selection regression class W6a itself fixed.
+      Nuance vs the audit: `DirAioParams` never includes tmpfs/ZFS (those
+      are `DirNoAioParams`), so the guard fired only on misconfigured
+      `RAFT_TMP_EXT4/XFS` or under the env lever. Skip narrowed back to
+      `uvThreadpoolBackend()` only. Verified on WSL: ext4 param RUNS and
+      passes (`RAFT_CANCELED`); threadpool lever still skips; contract
+      violation now fails loudly, byte-for-byte upstream. Windows
+      raft-uv-unit 20/20 (56 skipped) unchanged.
 - [ ] **T2 — Run the automake build at branch tip on Linux.** The tree's
       byte-identical-Makefile.am claim has never been *executed* on this
       branch's code. Specific risk found: `test/raft/unit/test_compress.c:22-27`
