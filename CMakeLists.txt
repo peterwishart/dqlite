@@ -181,7 +181,7 @@ endif()
 # Simulate a platform without Linux kernel AIO (macOS/Windows) so the portable
 # threadpool I/O path can be built and regression-tested on Linux. Defining
 # DQLITE_DISABLE_KAIO makes src/raft/uv_os.h leave DQLITE_HAVE_KAIO undefined,
-# compiling out every kernel-AIO/eventfd reference (see PORT_DESIGN.md).
+# compiling out every kernel-AIO/eventfd reference.
 if(DQLITE_DISABLE_KAIO)
   list(APPEND DQLITE_PLATFORM_DEFS DQLITE_DISABLE_KAIO)
 endif()

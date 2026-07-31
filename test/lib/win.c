@@ -6,7 +6,7 @@
  * archive on purpose: an archive member that contains only a constructor and
  * no symbol anybody references would never be pulled in by the linker, so the
  * setup would silently not run -- exactly the link-order-luck failure mode
- * this file exists to remove (PORT_TODO.md W8). An object listed on the
+ * this file exists to remove. An object listed on the
  * executable's link line is always included, so the constructor below is
  * guaranteed to run, before main() and before any munit suite-registration
  * constructor can matter.

@@ -27,8 +27,8 @@ static MunitParameterEnum stress_params[] = {
  * upstream default matrix above. readers=32 with databases=4 under a longer
  * run (count=1500) is the load that exposed the Windows shm virtual-address
  * aliasing corruption (the mmap shim's non-atomic MAP_FIXED emulation let
- * another database's WAL-index mapping steal the address mid-replacement; see
- * PORT_TODO.md section 9). Kept as one extra parameter set so that regression
+ * another database's WAL-index mapping steal the address mid-replacement).
+ * Kept as one extra parameter set so that regression
  * stays covered without slowing down every combination of the default
  * matrix. */
 static char *heavy_count[] = { "1500", NULL };

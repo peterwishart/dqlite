@@ -234,7 +234,7 @@ static inline int clock_gettime(clockid_t clk_id, struct timespec *tp)
  * primitive on this platform" branch (UV_ENOTSUP). An earlier iteration
  * defined O_DIRECT as 0, which made UvOsSetDirectIo take the Linux fcntl()
  * path and "succeed" as a no-op -- a false positive that probeDirectIO
- * (src/raft/uv_fs.c) then had to neutralise (PORT_TODO.md W5). */
+ * (src/raft/uv_fs.c) then had to neutralise. */
 #ifndef O_NONBLOCK
 #define O_NONBLOCK 0
 #endif
@@ -302,7 +302,7 @@ int fcntl(int fd, int cmd, ...);
  * object-creation entry points (dqlite_node_create, dqlite_server_create in
  * src/server.c) so Winsock is initialised before any raw socket()/
  * getaddrinfo() call the library makes -- structurally, not as a link-order
- * side effect (PORT_TODO.md W8). Declared here in the prelude so the guarded
+ * side effect. Declared here in the prelude so the guarded
  * call sites in shared sources need no Windows-only #include. */
 void dqliteWinSocketsInit(void);
 

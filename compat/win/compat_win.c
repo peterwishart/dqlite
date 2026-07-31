@@ -149,7 +149,7 @@ int fcntl(int fd, int cmd, ...)
  * documented 1ms minimum so a failed allocation still never yields a spin.
  *
  * The timer handle is created and closed PER CALL rather than cached
- * per-thread. Measured on this port's dev machine (see PORT_TODO.md W7a), the
+ * per-thread. Measured on this port's dev machine, the
  * create+set+wait+close cycle costs ~4-6us per call, which is (a) well under
  * the ~0.5ms floor the high-resolution timer can actually deliver, so caching
  * cannot improve the achieved sleep accuracy, and (b) negligible against even
@@ -212,7 +212,7 @@ int dqliteWinNanosleep(long long sec, long long nsec)
 /* Positional I/O on a CRT fd via ReadFile/WriteFile with an OVERLAPPED
  * offset: the offset travels IN the call, so the transfer neither depends on
  * nor mutates the fd's shared file position. Current callers are all
- * single-threaded per fd anyway (audited in PORT_TODO.md W7b).
+ * single-threaded per fd anyway (verified by auditing every call site).
  *
  * One Windows wrinkle: on a handle opened for synchronous I/O (all CRT fds),
  * ReadFile/WriteFile with an OVERLAPPED offset still ADVANCES the handle's

@@ -44,11 +44,13 @@
 #define DEFAULT_DIR_PERM 0700
 
 #if defined(_WIN32)
-/* Windows durability (route A): the compat prelude defines O_DSYNC as the
- * numeric value of libuv's UV_FS_O_DSYNC, which uv_fs_open() (the only path by
- * which dqlite's open flags reach the kernel on Windows, via UvOsOpen below)
- * translates to CreateFile's FILE_FLAG_WRITE_THROUGH. Guard against a libuv
- * upgrade silently changing the value. */
+/* Windows durability, write-through half (the explicit-flush half is in
+ * uvWriterWorkCbPortable, src/raft/uv_writer.c; see README.md "Durability on
+ * Windows"): the compat prelude defines O_DSYNC as the numeric value of
+ * libuv's UV_FS_O_DSYNC, which uv_fs_open() (the only path by which dqlite's
+ * open flags reach the kernel on Windows, via UvOsOpen below) translates to
+ * CreateFile's FILE_FLAG_WRITE_THROUGH. Guard against a libuv upgrade
+ * silently changing the value. */
 _Static_assert(O_DSYNC == UV_FS_O_DSYNC,
 	       "compat O_DSYNC must equal libuv's UV_FS_O_DSYNC");
 #endif

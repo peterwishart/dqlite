@@ -8,8 +8,8 @@
  * a delete-on-close temp file) lives in compat/win/compat_win.c.
  *
  * NOTE: MREMAP_MAYMOVE is intentionally left UNDEFINED so vfs.c selects its
- * portable "no mremap" fallback (map-at-fixed-address replace), matching the
- * macOS/Windows path described in PORT_DESIGN.md. Windows ONLY (compat/win/).
+ * portable "no mremap" fallback (map-at-fixed-address replace), the same path
+ * macOS takes (see vfsNoMremap() in src/vfs.c). Windows ONLY (compat/win/).
  *
  * Alignment contract: MapViewOfFile3 requires the target base address AND the
  * file offset to be multiples of the 64KiB allocation granularity. vfs.c's

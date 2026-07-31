@@ -631,12 +631,13 @@ static const struct UvWriterBackend uvWriterAioBackend = {
 #if defined(_WIN32)
 #include <io.h> /* _get_osfhandle */
 
-/* Windows durability (route B, see README.md "Durability on Windows"):
- * detect whether the OS handle backing a writer's fd was opened write-through
- * (FILE_FLAG_WRITE_THROUGH), i.e. whether O_DSYNC semantics were requested at
- * open time via the compat O_DSYNC -> UV_FS_O_DSYNC mapping. The query is
- * NtQueryInformationFile(FileModeInformation); it lives in ntdll, which dqlite
- * does not link against, so resolve it dynamically (ntdll is always loaded). */
+/* Windows durability, explicit-flush half (see README.md "Durability on
+ * Windows"): detect whether the OS handle backing a writer's fd was opened
+ * write-through (FILE_FLAG_WRITE_THROUGH), i.e. whether O_DSYNC semantics were
+ * requested at open time via the compat O_DSYNC -> UV_FS_O_DSYNC mapping. The
+ * query is NtQueryInformationFile(FileModeInformation); it lives in ntdll,
+ * which dqlite does not link against, so resolve it dynamically (ntdll is
+ * always loaded). */
 struct uvWriterNtIoStatusBlock
 {
 	union {
@@ -698,9 +699,10 @@ static void uvWriterWorkCbPortable(uv_work_t *work)
 	struct UvWriter *w = req->writer;
 	int rv = UvOsWrite(w->fd, req->tp_bufs, req->tp_nbufs, req->tp_offset);
 #if defined(_WIN32)
-	/* Windows durability (route B): FILE_FLAG_WRITE_THROUGH (route A, the
-	 * O_DSYNC -> UV_FS_O_DSYNC mapping in the compat prelude) pushes the
-	 * write past the OS file cache, but the storage device may still hold
+	/* Windows durability, explicit-flush half: write-through
+	 * (FILE_FLAG_WRITE_THROUGH, selected by the O_DSYNC -> UV_FS_O_DSYNC
+	 * mapping in the compat prelude) pushes the write past the OS file
+	 * cache, but the storage device may still hold
 	 * it in its own volatile cache -- NTFS requests FUA for write-through
 	 * writes, and consumer SATA disks commonly ignore FUA. Follow every
 	 * write on an O_DSYNC writer with an explicit fdatasync (libuv

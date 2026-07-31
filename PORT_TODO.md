@@ -1497,7 +1497,14 @@ behaviour change).
         `test/unit/ext/test_uv.c:11-23`) — largely resolved by R9/C7 below;
       - `sem_getvalue`→`atomic_int` explained 3× in
         `test/integration/test_node.c:369-375`/`:434-436`/`:451-456`.
-- [ ] **C6 — Make work-item codenames self-contained.** 34 comments across 25
+- [x] **C6 — Make work-item codenames self-contained. DONE 2026-07-31.**
+      All W/S/section/bug-number codenames swept from code files (C3-C5 had
+      removed most; the final 8 files done here). "route A/B" replaced with
+      the concrete mechanism names (write-through half / explicit-flush
+      half). Three load-bearing `PORT_DESIGN.md` pointers kept:
+      `uv_writer.c:59`, `vfs.c:1908`, `uv_fs.c:1231` (the three portable-seam
+      switches). Windows unit 328/328; Linux automake 324/324. Was: 34
+      comments across 25
       code files cite `PORT_TODO.md W3/W5/W7a/W7b/W8`, `S1`, "section 9", or
       `PORT_DESIGN.md`. Replace codename citations with the one-sentence fact
       they stand for; keep at most the genuinely load-bearing
