@@ -1,24 +1,15 @@
 /* Windows-only, per-test-binary process setup for the dqlite test harness.
  *
- * This file is compiled directly into EVERY test executable (see the WIN32
- * branch of the dqlite_test() helper in CMakeLists.txt). It is added to each
- * executable's own source list rather than to the dqlite_test convenience
- * archive on purpose: an archive member that contains only a constructor and
- * no symbol anybody references would never be pulled in by the linker, so the
- * setup would silently not run -- exactly the link-order-luck failure mode
- * this file exists to remove. An object listed on the
- * executable's link line is always included, so the constructor below is
- * guaranteed to run, before main() and before any munit suite-registration
- * constructor can matter.
+ * Compiled directly into EVERY test executable (see dqlite_test() in
+ * CMakeLists.txt), NOT into the dqlite_test convenience archive: an archive
+ * member containing only a constructor and no referenced symbol would never
+ * be pulled in by the linker, so the setup would silently not run. An object
+ * on the executable's link line is always included, so the constructor below
+ * is guaranteed to run before main().
  *
- * The CRT abort/report changes used to live in a constructor in
- * compat/win/compat_win.c, i.e. inside the shipped library, where they
- * suppressed WER crash dumps for ANY host process embedding dqlite. They are
- * test-harness policy, not library behaviour, so they were moved here;
- * consumers of dqlite.dll / dqlite_static.lib keep the CRT defaults (and
- * their crash dumps). The library keeps only the Winsock initialisation, done
- * structurally from its public entry points (dqliteWinSocketsInit(), see
- * compat/win/compat_win.c).
+ * The CRT abort/report changes here are test-harness policy, not library
+ * behaviour; they deliberately live outside compat_win.c so consumers of
+ * dqlite.dll / dqlite_static.lib keep the CRT defaults (and crash dumps).
  */
 
 #ifdef _WIN32

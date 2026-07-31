@@ -1512,7 +1512,12 @@ behaviour change).
       `src/vfs.c:1902`) since those docs are committed on this branch. Also
       resolve the undefined "route A"/"route B" shorthand at
       `src/raft/uv_os.c:47`, `src/raft/uv_writer.c:634`/`:701`.
-- [ ] **C7 — Condense the worst long blocks** (>20 lines each; keep the
+- [x] **C7 — Condense the worst long blocks. DONE 2026-07-31.** All nine
+      sites cut to the constraint (net −112 lines); comment-only proven by
+      identical comment-stripped token streams on both platforms;
+      `UNVERIFIED-NEEDS-MAC` markers untouched (11 before/after). Windows
+      unit 328/328 + raft-uv-unit 20/20; Linux unit 324/324 + raft-uv-unit
+      25/25. Was: (>20 lines each; keep the
       constraint, drop the essay): `compat/win/compat_win.c:1-29`, `:141-171`,
       `:567-588`, `:792-812`; `compat/win/dqlite_win_prelude.h:1-29`;
       `CMakeLists.txt:1-30` header + redundant `TODO(macos)` block at

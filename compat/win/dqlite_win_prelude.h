@@ -1,28 +1,20 @@
 /*
  * dqlite Windows port -- forced-include prelude (POSIX-compat shim layer).
  *
- * This header is force-included (clang-cl /FI) into every translation unit on
- * Windows ONLY. It is wired in from CMakeLists.txt inside the `if(WIN32)`
- * branch and lives in compat/win/, a directory that is added to the include
- * path exclusively on Windows -- it is never on the Linux/macOS include path
- * and must never shadow the real system headers there.
+ * Force-included (clang-cl /FI, wired from the `if(WIN32)` branch of
+ * CMakeLists.txt) into every translation unit on Windows ONLY; compat/win/
+ * is never on the Linux/macOS include path.
  *
  * Responsibilities:
  *
- *  1. Resolve the winuser.h `IN`/`OUT` SAL-annotation cascade.
- *     dqlite's src/utils.h defines a *function-like* macro `IN(E, ...)`
- *     (pulled into most TUs via src/tracing.h). When that macro is seen before
- *     <windows.h>, the SDK's own `#ifndef IN / #define IN` (empty) guard in
- *     minwindef.h is skipped, so winuser.h prototypes such as
- *     `RegisterPowerSettingNotification(IN HANDLE h, ...)` are parsed with a
- *     bare, undefined `IN` token -> "unknown type name 'IN'" (~1000 errors).
- *
- *     Fix: pull in the Winsock/Windows SDK headers HERE, first, so every SAL
- *     annotation (`IN`, `OUT`, `OPTIONAL`, ...) resolves to the SDK's empty
- *     macros while those headers are parsed. Then `#undef IN` so that when
- *     utils.h is later included it can define its own function-like `IN()`
- *     without colliding. Because the SDK headers use include guards, the later
- *     includes via <uv.h> (uv/win.h) are no-ops and never re-parse a bare `IN`.
+ *  1. Resolve the winuser.h `IN`/`OUT` SAL-annotation cascade. dqlite's
+ *     src/utils.h defines a *function-like* macro `IN(E, ...)`; if that macro
+ *     is seen before <windows.h>, the SDK headers parse their `IN`-annotated
+ *     prototypes with a bare undefined token (~1000 errors). Fix: include the
+ *     Winsock/Windows SDK headers HERE, first, so every SAL annotation
+ *     resolves to the SDK's empty macros, then `#undef IN` so utils.h can
+ *     later define its own. The SDK include guards make the later includes
+ *     via <uv.h> no-ops, so a bare `IN` is never re-parsed.
  *
  *  2. Provide the POSIX scalar types (ssize_t, mode_t) universally, so code
  *     that uses them without including <unistd.h> still compiles.

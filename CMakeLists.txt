@@ -1,30 +1,16 @@
 # ---------------------------------------------------------------------------
 # dqlite — cross-platform CMake build
 #
-# What each platform branch does today:
-#
 #   Linux — fully wired; the reference build. Deps via pkg-config (libuv,
-#     sqlite3, optional liblz4). Defines _GNU_SOURCE and _FILE_OFFSET_BITS=64,
-#     probes <linux/io_uring.h> / <linux/aio_abi.h> / <xfs/xfs.h>, and requires
-#     RWF_NOWAIT (kernel >= 4.14) for the kernel-AIO raft I/O backend.
-#
+#     sqlite3, optional liblz4); requires RWF_NOWAIT (kernel >= 4.14) for the
+#     kernel-AIO raft I/O backend.
 #   Windows — fully wired; builds and runs the test suites today. Deps via
-#     vcpkg in manifest mode (find_package: libuv, unofficial-sqlite3, optional
-#     lz4; libuv::uv_a is aliased to libuv::uv so static triplets work too).
-#     Adds the WIN32-only compat/win POSIX shim-header directory plus a forced
-#     include (/FI compat/win/dqlite_win_prelude.h), and links the
-#     dqlite_win_compat static library that implements the POSIX functions with
-#     no UCRT equivalent. Defines DQLITE_BUILDING so the public API is
-#     dllexport'ed from dqlite.dll, and renames the static archive to
-#     dqlite_static.lib so it cannot collide with the DLL's import library.
-#     DQLITE_HAVE_KAIO stays undefined off-Linux, so raft I/O uses the portable
-#     libuv threadpool write path.
-#
+#     vcpkg in manifest mode. Adds the WIN32-only compat/win shim-header
+#     directory plus the forced prelude (/FI) and links the dqlite_win_compat
+#     static library; DQLITE_HAVE_KAIO stays undefined off-Linux, so raft I/O
+#     uses the portable libuv threadpool write path.
 #   macOS — the elseif(APPLE) branch is a deliberate FATAL_ERROR stub; the
 #     UNVERIFIED-NEEDS-MAC markers in the sources are the outstanding work-list.
-#
-# Structured this way so the file is upstreamable: a single build description
-# that grows a real backend per platform rather than a fork.
 #
 # Toolchain: configure with Clang on every platform for consistency
 #   Linux : cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang
@@ -150,10 +136,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   endif()
 
 elseif(APPLE)
-  # TODO(macos): dqlite has no macOS I/O backend yet. The portable raft core
-  # compiles, but src/raft/{syscall,uv_os,uv_fs,uv_writer}.c use Linux kernel
-  # AIO/io_uring/eventfd/statfs with no Darwin equivalent. A port would replace
-  # these with kqueue + libuv's fs threadpool (or Grand Central Dispatch I/O).
   list(APPEND DQLITE_PLATFORM_DEFS _DARWIN_C_SOURCE)
   message(FATAL_ERROR
     "macOS I/O backend not implemented yet. Port required for: "

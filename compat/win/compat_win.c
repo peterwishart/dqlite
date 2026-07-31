@@ -6,26 +6,8 @@
  * (guarded on _WIN32 and wired into the build via an if(WIN32) static library
  * `dqlite_win_compat` -- see CMakeLists.txt). No non-Windows build sees this
  * file. Prototypes match the shim headers in compat/win/ (ftw.h, sys/vfs.h,
- * sys/statvfs.h) and the fcntl() declaration in the forced prelude.
- *
- * Behavioural summary:
- *  - dqliteWinSocketsInit(): idempotent process-wide WSAStartup, called from
- *               the library's public entry points (see the function comment).
- *  - fcntl():   implements NO command -- always fails with ENOSYS. See the
- *               function comment; no Windows-compiled code calls it.
- *  - dqliteWinNanosleep(): sub-millisecond sleep on a high-resolution
- *               waitable timer, backing the nanosleep() wrapper in unistd.h
- *               (vfs.c's WAL-contention backoff needs microsecond sleeps).
- *  - pread()/pwrite(): positional I/O via ReadFile/WriteFile with an
- *               OVERLAPPED offset; does not disturb the fd's file position.
- *  - statfs()/fstatfs(): report a generic, tmpfs-like filesystem so the raft
- *               direct-I/O probe (uv_fs.c) concludes "not a direct-I/O capable
- *               fs" and falls back to the portable buffered write path.
- *  - statvfs()/fstatvfs(): report free space (queried via GetDiskFreeSpaceEx,
- *               but CAPPED -- see below) for the test disk-fill helper.
- *  - nftw():    a real recursive directory walk honouring FTW_DEPTH (post-order)
- *               and FTW_PHYS (don't descend into reparse points), used by the
- *               test teardown to remove a temp tree.
+ * sys/statvfs.h) and the fcntl() declaration in the forced prelude. Each
+ * function's contract is documented at its own definition below.
  */
 
 #ifdef _WIN32
@@ -129,34 +111,21 @@ int fcntl(int fd, int cmd, ...)
 /* dqliteWinNanosleep(): the real function behind the nanosleep() wrapper in
  * compat/win/unistd.h.
  *
- * The production caller is vfsSleep (src/vfs.c, SQLite's xSleep), which
- * SQLite's WAL code calls with MICROSECOND durations (walTryBeginRead backs
- * off 1us..~350us per retry while the WAL-index locks are contended). Plain
- * Sleep() has millisecond granularity, so the previous ms-truncating shim
- * turned every sub-ms request into Sleep(0): a scheduler yield, i.e. the
- * "backoff" busy-spun under exactly the contention it was meant to relieve.
+ * The production caller is vfsSleep (src/vfs.c, SQLite's xSleep), whose WAL
+ * backoff sleeps for MICROSECOND durations. Plain Sleep() has millisecond
+ * granularity, so an ms-truncating shim turns every sub-ms request into
+ * Sleep(0) -- a scheduler yield that busy-spins under exactly the contention
+ * the backoff is meant to relieve. Windows 10 1803+ high-resolution waitable
+ * timers (CREATE_WAITABLE_TIMER_HIGH_RESOLUTION) honour the 100ns-unit due
+ * time instead of rounding up to the scheduler tick; that 1803 floor is
+ * already REQUIRED by mmap()'s placeholder APIs below. If the flag is
+ * rejected (pre-1803) we remember that and retry without it, degrading to
+ * tick-quantum granularity; if no timer can be created at all we fall back to
+ * Sleep() rounded UP to a 1ms minimum -- every path sleeps, none spins.
  *
- * Windows 10 1803+ provides high-resolution waitable timers
- * (CreateWaitableTimerExW with CREATE_WAITABLE_TIMER_HIGH_RESOLUTION), which
- * honour the requested 100ns-unit due time instead of rounding it up to the
- * scheduler tick (15.6ms by default, 1ms at best via timeBeginPeriod). This is
- * the same Windows 10 1803 floor as the placeholder mapping APIs that mmap()
- * below already REQUIRES, so the flag is expected to be supported everywhere
- * dqlite runs; should it not be (CreateWaitableTimerExW returns NULL), we
- * retry without the flag and remember the downgrade, degrading to tick-quantum
- * granularity -- a sleep of at least one scheduler tick, never a spin.
- * If even the plain timer cannot be created, fall back to Sleep() with a
- * documented 1ms minimum so a failed allocation still never yields a spin.
- *
- * The timer handle is created and closed PER CALL rather than cached
- * per-thread. Measured on this port's dev machine, the
- * create+set+wait+close cycle costs ~4-6us per call, which is (a) well under
- * the ~0.5ms floor the high-resolution timer can actually deliver, so caching
- * cannot improve the achieved sleep accuracy, and (b) negligible against even
- * the smallest sub-ms sleep it enables. A thread-local cache would save those
- * microseconds but leak one timer handle per exited thread (libuv threadpool
- * workers, munit's forked children) unless paired with FlsAlloc destructor
- * machinery -- complexity with no measurable benefit on this path. */
+ * The timer handle is created and closed PER CALL: the cycle costs a few
+ * microseconds, negligible against any sub-ms sleep, and a per-thread cache
+ * would leak a handle per exited thread without FlsAlloc machinery. */
 int dqliteWinNanosleep(long long sec, long long nsec)
 {
 	/* Total duration in 100ns units, rounding any nonzero sub-100ns
@@ -572,19 +541,13 @@ int flock(int fd, int operation)
  * so no runtime setup is needed. */
 static SRWLOCK dqliteMmapLock = SRWLOCK_INIT;
 
-/* Windows 10 (1803+, RS4) added placeholder virtual-address reservations, which
- * let a file view be swapped in and out of an address range WITHOUT ever
- * releasing that range -- the atomic-replace primitive dqlite's WAL-index shm
- * COW scheme needs (it is what makes Linux MAP_FIXED / mremap(MREMAP_FIXED)
- * safe). We resolve them dynamically from kernelbase.dll and REQUIRE them:
- * dqlite already assumes Windows 10 1803+ elsewhere (high-resolution waitable
- * timers, AF_UNIX sockets), and any unmap-then-remap fallback has an inherent
- * race -- between UnmapViewOfFile() and MapViewOfFileEx() any other allocation
- * in the process can steal the address, silently aliasing two databases' shm
- * views. On pre-1803 systems mmap() fails cleanly with a diagnostic instead.
- *
- * Constants (winnt.h): MEM_RESERVE_PLACEHOLDER 0x40000, MEM_REPLACE_PLACEHOLDER
- * 0x4000, MEM_PRESERVE_PLACEHOLDER 0x2. */
+/* Windows 10 1803+ placeholder virtual-address reservations let a file view
+ * be swapped in and out of an address range WITHOUT ever releasing it -- the
+ * atomic-replace primitive dqlite's WAL-index shm COW scheme needs. Resolved
+ * dynamically from kernelbase.dll and REQUIRED: any non-atomic unmap-then-
+ * remap fallback has an inherent race in which a concurrent allocation can
+ * steal the freed address, silently aliasing two databases' shm views. On
+ * pre-1803 systems mmap() fails cleanly with a diagnostic instead. */
 typedef PVOID(WINAPI *dqliteVirtualAlloc2Fn)(HANDLE,
 					     PVOID,
 					     SIZE_T,
@@ -769,27 +732,17 @@ void *mmap(void *addr,
 		return MAP_FAILED;
 	}
 
-	/* dqlite drives the WAL-index shm mappings (vfs.c) from multiple
-	 * threadpool worker threads concurrently -- one per database -- and its
-	 * COW scheme repeatedly replaces a view at a fixed address in place
-	 * (MAP_FIXED) to toggle a region between shared and private. On Linux
-	 * that is mremap(MREMAP_FIXED): an atomic replace that never releases the
-	 * address. Windows has no such primitive for a plain MapViewOfFileEx --
-	 * the address must be UnmapViewOfFile'd first, and during that window ANY
-	 * other allocation in the process (another worker's mmap(NULL) scratch,
-	 * the CRT/libuv heap via VirtualAlloc, a thread stack) can be handed that
-	 * exact address by the kernel. The subsequent MapViewOfFileEx then cannot
-	 * reclaim it, so two databases' shm views alias and the WAL index is
-	 * corrupted (manifesting as spurious SQLITE_NOMEM / SQLITE_ERROR under
-	 * concurrency).
-	 *
-	 * The fix is the Win10 1803+ placeholder API: a placeholder keeps the
-	 * virtual-address range RESERVED to us while no view occupies it, so a
-	 * MAP_FIXED replace (UnmapViewOfFile2(...PRESERVE) then
-	 * MapViewOfFile3(...REPLACE)) never exposes a free window -- matching the
-	 * Linux atomic-replace semantics exactly. The lock still serialises the
-	 * multi-step sequences for good measure. The placeholder API is a hard
-	 * requirement (checked above); there is no pre-1803 fallback. */
+	/* dqlite's WAL-index shm COW scheme (vfs.c) repeatedly replaces a view
+	 * at a fixed address (MAP_FIXED) -- on Linux mremap(MREMAP_FIXED), an
+	 * atomic replace that never releases the address. Windows has no such
+	 * primitive for plain MapViewOfFileEx: the address must be unmapped
+	 * first, and in that window ANY other allocation in the process can be
+	 * handed the exact address, aliasing two databases' shm views and
+	 * corrupting the WAL index. The Win10 1803+ placeholder API closes the
+	 * window: UnmapViewOfFile2(...PRESERVE) then MapViewOfFile3(...REPLACE)
+	 * keeps the range reserved to us throughout (a hard requirement, checked
+	 * above; no pre-1803 fallback). The lock still serialises the multi-step
+	 * sequences. */
 	AcquireSRWLockExclusive(&dqliteMmapLock);
 
 	int fixed = (flags & MAP_FIXED) && addr != NULL;

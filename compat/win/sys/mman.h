@@ -1,22 +1,15 @@
 /*
- * dqlite Windows port -- <sys/mman.h> minimal memory-mapping shim.
+ * dqlite Windows port -- <sys/mman.h> minimal memory-mapping shim (Windows
+ * ONLY). Declares the mmap/munmap surface and PROT_/MAP_ flags used by
+ * src/vfs.c (WAL shared memory); the implementation (Win10 1803+ placeholder
+ * APIs, a hard requirement -- see mmap()) lives in compat/win/compat_win.c.
  *
- * Declares the mmap/munmap surface and the PROT_ / MAP_ flags used by
- * src/vfs.c (WAL shared-memory). The IMPLEMENTATION (CreateFileMapping plus
- * the Win10 1803+ placeholder APIs VirtualAlloc2/MapViewOfFile3/
- * UnmapViewOfFile2 -- a hard requirement, see mmap() -- and memfd_create via
- * a delete-on-close temp file) lives in compat/win/compat_win.c.
- *
- * NOTE: MREMAP_MAYMOVE is intentionally left UNDEFINED so vfs.c selects its
- * portable "no mremap" fallback (map-at-fixed-address replace), the same path
- * macOS takes (see vfsNoMremap() in src/vfs.c). Windows ONLY (compat/win/).
- *
- * Alignment contract: MapViewOfFile3 requires the target base address AND the
- * file offset to be multiples of the 64KiB allocation granularity. vfs.c's
- * vfsGetMapSize() derives both from dqlite_win_allocation_granularity()
- * (compat/win/unistd.h) on Windows, so every vfs mapping is 64KiB-aligned and
- * satisfiable. (sysconf(_SC_PAGESIZE) reports the true 4KiB page size and is
- * NOT usable for this.)
+ * MREMAP_MAYMOVE is intentionally left UNDEFINED so vfs.c selects its
+ * portable "no mremap" fallback, the same path macOS takes. Alignment
+ * contract: MapViewOfFile3 needs the base address AND file offset to be
+ * 64KiB-granularity multiples; vfs.c derives both from
+ * dqlite_win_allocation_granularity() (compat/win/unistd.h), NOT
+ * sysconf(_SC_PAGESIZE) (which reports the true 4KiB page size).
  */
 #ifndef DQLITE_COMPAT_SYS_MMAN_H
 #define DQLITE_COMPAT_SYS_MMAN_H

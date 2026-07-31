@@ -20,12 +20,7 @@
  *   - "aio"        : Linux kernel AIO (io_submit/eventfd/uv_poll), the historical
  *                    fast path. Compiled only when DQLITE_HAVE_KAIO is defined.
  *   - "threadpool" : portable libuv threadpool + uv_fs_write. No Linux-only
- *                    primitives; the basis for the macOS/Windows port.
- *
- * A future Windows IOCP backend or a Linux RWF_NOWAIT fast-path plugs in purely
- * by adding another struct UvWriterBackend instance and selecting it in
- * UvWriterInit -- callers, the UvWriter/UvWriterReq types, and the shared
- * segment/prepare/finalize/truncate logic above this file stay unchanged. */
+ *                    primitives; the basis for the macOS/Windows port. */
 struct UvWriterBackend
 {
 	const char *name;
