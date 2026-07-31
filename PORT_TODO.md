@@ -1853,3 +1853,16 @@ socket name collision (root-caused, errno-proven).**
   `/WX`, codespell over the tree, node `--list` smoke. Real semantic
   validation happens on the first push (`gh run list`); Actions must be
   enabled on the fork.
+- First-runs shakedown (2026-08-01): vcpkg checkout pinned to the manifest
+  baseline (image drift broke version resolution); `ilammy/msvc-dev-cmd`
+  replaced with a native vcvarsall step and `actions/cache` bumped v4→v6
+  (node20 deprecation warnings); and the first genuine flake caught:
+  `role_management/promote` got a FAILURE response
+  (`DQLITE_CLIENT_PROTO_RECEIVED_FAILURE`) adding node 3 — raft's
+  RAFT_CANTCHANGE while the engine's own promotion was still in flight, a
+  pre-existing upstream test assumption (first-try ADD success) exposed by
+  the slow runner; ADD sites now poll via an `addNode()` helper matching
+  the test's own TRIES idiom. The 49 stress "failures" in the same run were
+  cascade poisoning (no-fork munit) from that one failure. Full Windows
+  suite passed at merge 2bd29ae, confirming the vcvarsall step was not the
+  cause.

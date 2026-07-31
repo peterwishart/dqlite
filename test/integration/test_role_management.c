@@ -103,6 +103,31 @@ static bool hasRole(struct fixture *f, dqlite_node_id id, int role)
 	return ret;
 }
 
+/* Add a node, tolerating transient rejections. Raft refuses a membership
+ * change while a previous configuration change is still in flight
+ * (RAFT_CANTCHANGE), which the server reports as a FAILURE response
+ * (DQLITE_CLIENT_PROTO_RECEIVED_FAILURE). On a loaded machine the
+ * role-management engine's own promotions can race the next ADD, so poll
+ * like the hasRole() loops do instead of asserting first-try success. */
+static void addNode(struct fixture *f, unsigned id, const char *address)
+{
+	int tries;
+	int rv;
+
+	for (tries = 0; tries < TRIES; tries += 1) {
+		rv = clientSendAdd(f->client, id, address, NULL);
+		munit_assert_int(rv, ==, 0);
+		rv = clientRecvEmpty(f->client, NULL);
+		if (rv == 0) {
+			return;
+		}
+		munit_assert_int(rv, ==,
+				 DQLITE_CLIENT_PROTO_RECEIVED_FAILURE);
+		sleep(1);
+	}
+	munit_errorf("add node %u: still rejected after %d tries", id, TRIES);
+}
+
 TEST(role_management, promote, setUp, tearDown, 0, role_management_params)
 {
 	struct fixture *f = data;
@@ -114,7 +139,7 @@ TEST(role_management, promote, setUp, tearDown, 0, role_management_params)
 
 	id = 2;
 	address = f->servers[1].address;
-	ADD(id, address);
+	addNode(f, id, address);
 	for (tries = 0; tries < TRIES && !hasRole(f, 2, DQLITE_VOTER);
 	     tries += 1) {
 		sleep(1);
@@ -125,7 +150,7 @@ TEST(role_management, promote, setUp, tearDown, 0, role_management_params)
 
 	id = 3;
 	address = f->servers[2].address;
-	ADD(id, address);
+	addNode(f, id, address);
 	for (tries = 0; tries < TRIES && !hasRole(f, 3, DQLITE_VOTER);
 	     tries += 1) {
 		sleep(1);
@@ -136,7 +161,7 @@ TEST(role_management, promote, setUp, tearDown, 0, role_management_params)
 
 	id = 4;
 	address = f->servers[3].address;
-	ADD(id, address);
+	addNode(f, id, address);
 	for (tries = 0; tries < TRIES && !hasRole(f, 4, DQLITE_STANDBY);
 	     tries += 1) {
 		sleep(1);
@@ -147,7 +172,7 @@ TEST(role_management, promote, setUp, tearDown, 0, role_management_params)
 
 	id = 5;
 	address = f->servers[4].address;
-	ADD(id, address);
+	addNode(f, id, address);
 	for (tries = 0; tries < TRIES && !hasRole(f, 5, DQLITE_STANDBY);
 	     tries += 1) {
 		sleep(1);
