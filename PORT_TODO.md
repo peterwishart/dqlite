@@ -1625,11 +1625,14 @@ net additions. One marginal drop, several gaps.
       (the ack-before-write bug class); it cannot detect a missing *device*
       flush — that needs power-loss testing. `portable-check.sh` runs it via
       the full raft-uv-integration binary automatically.
-- [ ] **T6 — Decide `stress/read_write_heavy` default-run policy.**
-      `test/integration/test_stress.c:266` (count=1500, writers=4, readers=32,
-      databases=4) is unguarded and now runs in every Linux `make check`,
-      materially lengthening it. Either accept (document expected runtime) or
-      gate behind an env opt-in like the other heavy diagnostics.
+- [x] **T6 — `stress/read_write_heavy` default-run policy. DONE 2026-07-31:
+      default-on, `SKIP_STRESS` opt-out.** Measured: ~86s Linux / ~61s
+      Windows — under the 90s line, and the shared `run_read_write()` body
+      already honours upstream's `SKIP_STRESS` opt-out (proven live:
+      `[ SKIP ]`). Runtime + opt-out now documented in the test comment; no
+      new env var. Full stress suite 46/46 on both platforms. Side note for
+      run books: running both platforms' full stress suites concurrently on
+      this box destabilised the WSL VM — run them sequentially.
 
 ### 12.4 Older PORT_TODO items — triage for this round
 

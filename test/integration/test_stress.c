@@ -30,7 +30,9 @@ static MunitParameterEnum stress_params[] = {
  * another database's WAL-index mapping steal the address mid-replacement).
  * Kept as one extra parameter set so that regression
  * stays covered without slowing down every combination of the default
- * matrix. */
+ * matrix. Expected runtime is roughly 60-90 seconds (measured ~86s on
+ * Linux, ~61s on Windows); like the default matrix it honours the
+ * SKIP_STRESS environment variable as an opt-out. */
 static char *heavy_count[] = { "1500", NULL };
 static char *heavy_writers[] = { "4", NULL };
 static char *heavy_readers[] = { "32", NULL };
