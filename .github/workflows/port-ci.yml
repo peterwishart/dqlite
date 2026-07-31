@@ -196,10 +196,30 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # MSVC environment (INCLUDE/LIB/link.exe/Windows SDK) for clang-cl.
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
+      # MSVC environment (INCLUDE/LIB/link.exe/Windows SDK) for clang-cl:
+      # run vcvarsall.bat x64 and export the resulting environment to all
+      # later steps. Plain PowerShell instead of a third-party action
+      # (ilammy/msvc-dev-cmd emitted node deprecation warnings and is one
+      # more supply-chain dependency); vswhere locates the newest VS
+      # (VS 2026 = "18" on this image) regardless of edition or path scheme.
+      - name: MSVC build environment (vcvarsall x64)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * `
+                  -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                  -property installationPath
+          if (-not $vs) { Write-Error "vswhere found no VC toolset"; exit 1 }
+          $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvarsall.bat"
+          Write-Host "vcvarsall: $vcvars"
+          # Run it in cmd, dump the resulting environment, export every
+          # variable to GITHUB_ENV so all subsequent steps (bash and pwsh)
+          # inherit the MSVC toolchain environment.
+          cmd /s /c "`"$vcvars`" x64 >NUL && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              Add-Content -Path $env:GITHUB_ENV -Value "$($Matches[1])=$($Matches[2])"
+            }
+          }
 
       # Pin the runner image's LLVM clang-cl by absolute path so the compiler
       # is not whatever `clang-cl` happens to shadow on PATH after
