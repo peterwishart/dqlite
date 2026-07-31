@@ -774,7 +774,13 @@ static struct vfs *vfsCreate(const struct vfsConfig *config)
 
 	*v = (struct vfs) {
 		.config = config,
-		.base_vfs = sqlite3_vfs_find(NULL),
+		/* Pin the platform VFS by name (as upstream does with "unix"),
+		 * so an embedder-registered custom default VFS is never used. */
+#ifdef _WIN32
+		.base_vfs = sqlite3_vfs_find("win32"),
+#else
+		.base_vfs = sqlite3_vfs_find("unix"),
+#endif
 	};
 	dqlite_assert(v->base_vfs != NULL);
 	return v;

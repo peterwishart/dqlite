@@ -1375,10 +1375,12 @@ behaviour change).
       init the crng in milliseconds via jitter entropy), the consumer is a
       4-byte `srand()` seed, and the trade-off is already documented at the
       call site (`src/raft/uv.c:637-644`). Accepted as-is.
-- [ ] **R3 — `base_vfs` lookup: keep `"unix"` on Linux (review B-4b).**
-      `src/vfs.c:777` uses `sqlite3_vfs_find(NULL)` (upstream: `"unix"`);
-      temp-file delegation (`src/vfs.c:2375-2384`) would silently follow an
-      embedder-registered custom default VFS. Use `NULL` only under `_WIN32`.
+- [x] **R3 — `base_vfs` lookup: keep `"unix"` on Linux (review B-4b).
+      DONE 2026-07-31.** `src/vfs.c` now pins the platform VFS by name on
+      both platforms: `"unix"` on non-Windows (upstream-identical) and
+      `"win32"` (SQLite's canonical Windows VFS) instead of `NULL`, so an
+      embedder-registered custom default VFS is never silently followed
+      anywhere. Windows unit-test 323/323, Linux automake 324/324.
 - [ ] **R4 — Guard the test-heap `sqlite3_shutdown()` (review B-4c).**
       `test/lib/heap.c:154` runs unconditionally; the 11-line rationale above
       it is Windows-only (no-fork munit). Wrap in `#ifdef _WIN32` and shrink
