@@ -189,7 +189,7 @@ jobs:
   # them from the cache.
   # -------------------------------------------------------------------------
   windows-cmake:
-    runs-on: windows-2022
+    runs-on: windows-2025-vs2026
     timeout-minutes: 120
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
@@ -221,23 +221,6 @@ jobs:
             git -C "$VCPKG_INSTALLATION_ROOT" fetch origin master
             git -C "$VCPKG_INSTALLATION_ROOT" cat-file -e "$baseline^{commit}"
           fi
-
-      - name: Ensure vcpkg has up-to-date versions
-        run: |
-          echo "VCPKG_INSTALLATION_ROOT=$VCPKG_INSTALLATION_ROOT"
-          # fetch all refs and tags so vcpkg has the latest version database entries
-          git -C "$VCPKG_INSTALLATION_ROOT" fetch --all --tags
-          # update master/main so builtin-baseline commits and registered versions are present
-          git -C "$VCPKG_INSTALLATION_ROOT" fetch origin master:master || true
-          git -C "$VCPKG_INSTALLATION_ROOT" fetch origin main:main || true
-          git -C "$VCPKG_INSTALLATION_ROOT" show --no-patch --pretty=oneline HEAD || true
-        shell: bash
-
-      - name: Ensure Ninja is installed (Windows)
-        run: |
-          choco install ninja -y
-          refreshenv || true
-        shell: powershell
 
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
