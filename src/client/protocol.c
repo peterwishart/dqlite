@@ -18,23 +18,10 @@
 #include "dqlite_win_pipe.h" /* overlapped pipe read/write helpers */
 #endif
 
-#ifdef _WIN32
-/* The synchronous client talks to a dqlite node over whatever the node listens
- * on. On Windows that is either a TCP loopback SOCKET ("host:port") or a Win32
- * named pipe (the local "@name" transport). Socket descriptors need
- * WSAPoll/send/recv/closesocket; named-pipe descriptors are CRT fds wrapping a
- * (blocking) pipe HANDLE and use read/write/close -- WSAPoll cannot poll a
- * pipe. Discriminate safely with getsockopt(SO_TYPE): it returns 0 for a real
- * socket and fails with WSAENOTSOCK for a pipe fd cast to SOCKET (no CRT
- * invalid-parameter abort, unlike _get_osfhandle on a socket value). */
-static bool clientFdIsSocket(int fd)
-{
-	int type;
-	int len = (int)sizeof type;
-	return getsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_TYPE,
-			  (char *)&type, &len) == 0;
-}
-#endif
+/* On Windows the synchronous client talks to a dqlite node over either a TCP
+ * loopback SOCKET ("host:port") or a Win32 named pipe (the local "@name"
+ * transport) -- WSAPoll cannot poll a pipe, so the two need different I/O
+ * paths, discriminated with DqliteWinFdIsSocket() (dqlite_win_pipe.h). */
 
 static void oom(void)
 {
@@ -152,7 +139,7 @@ static ssize_t doRead(int fd,
 	int rv;
 
 #ifdef _WIN32
-	if (!clientFdIsSocket(fd)) {
+	if (!DqliteWinFdIsSocket(fd)) {
 		/* Named pipe (overlapped): WSAPoll cannot poll a pipe. Drive an
 		 * overlapped read with the caller's deadline as the timeout, so
 		 * callers such as the role-management poller (src/roles.c) do
@@ -310,7 +297,7 @@ static ssize_t doWrite(int fd,
 	int rv;
 
 #ifdef _WIN32
-	if (!clientFdIsSocket(fd)) {
+	if (!DqliteWinFdIsSocket(fd)) {
 		/* Named pipe (overlapped): write via the overlapped helper. */
 		n = DqliteWinPipeWriteAll((HANDLE)_get_osfhandle(fd), buf,
 					  buf_len);
@@ -463,7 +450,7 @@ void clientClose(struct client_proto *c)
 		return;
 	}
 #ifdef _WIN32
-	if (clientFdIsSocket(c->fd)) {
+	if (DqliteWinFdIsSocket(c->fd)) {
 		closesocket((SOCKET)(uintptr_t)c->fd);
 	} else {
 		close(c->fd);

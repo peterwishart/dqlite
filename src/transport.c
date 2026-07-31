@@ -77,12 +77,7 @@ static void connect_work_cb(uv_work_t *work)
 	size_t n2;
 	int rv;
 #ifdef _WIN32
-	/* On Windows the fd from the connect function is either a Winsock SOCKET
-	 * (TCP "host:port") or a CRT fd wrapping a named-pipe HANDLE (local
-	 * "@name"). Socket I/O uses send()/closesocket(); pipe I/O uses the CRT
-	 * write()/close() which operate on the _open_osfhandle'd descriptor. The
-	 * "@name" prefix distinguishes the two. */
-	bool is_pipe = (r->address != NULL && r->address[0] == '@');
+	bool is_pipe;
 #endif
 
 	/* Establish a connection to the other node using the provided connect
@@ -93,6 +88,17 @@ static void connect_work_cb(uv_work_t *work)
 		rv = RAFT_NOCONNECTION;
 		goto err;
 	}
+
+#ifdef _WIN32
+	/* On Windows the fd from the connect function is either a Winsock SOCKET
+	 * (TCP "host:port") or a CRT fd wrapping a named-pipe HANDLE (local
+	 * "@name"). Socket I/O uses send()/closesocket(); pipe I/O uses the CRT
+	 * write()/close() which operate on the _open_osfhandle'd descriptor.
+	 * Discriminate by the fd itself (see DqliteWinFdIsSocket), not by the
+	 * address string: custom connect functions (raftProxySetConnectFunc)
+	 * may hand back either kind for any address form. */
+	is_pipe = !DqliteWinFdIsSocket(r->fd);
+#endif
 
 	/* Send the initial dqlite protocol handshake. */
 	protocol = ByteFlipLe64(DQLITE_PROTOCOL_VERSION);
@@ -193,7 +199,7 @@ static void connect_after_work_cb(uv_work_t *work, int status)
 		tracef("transport stream failed %d", rv);
 		r->status = RAFT_NOCONNECTION;
 #ifdef _WIN32
-		if (r->address != NULL && r->address[0] == '@') {
+		if (!DqliteWinFdIsSocket(r->fd)) {
 			close(r->fd);
 		} else {
 			closesocket((SOCKET)(uintptr_t)r->fd);

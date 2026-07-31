@@ -30,13 +30,32 @@
 #error "dqlite compat/win shim header reached without the dqlite Windows prelude (DQLITE_WIN_COMPAT undefined); this header must not shadow a real system header -- see compat/win/dqlite_win_prelude.h"
 #endif
 
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 #ifndef _INC_WINDOWS
 #include <windows.h> /* CreateFile, ReadFile, WriteFile, OVERLAPPED, ... */
 #endif
+
+/* The Windows port funnels descriptors of exactly two kinds through int-typed
+ * fd variables: a Winsock SOCKET widened to int (the TCP "host:port"
+ * transport; NOT a CRT file descriptor) and a CRT fd wrapping a named-pipe
+ * HANDLE from _open_osfhandle (the local "@name" transport). Sockets need
+ * WSAPoll/send/recv/closesocket/uv_tcp_open; pipe fds need
+ * read/write/close/uv_pipe_open. This is the ONE canonical discriminator:
+ * getsockopt(SO_TYPE) returns 0 for a real socket and fails with WSAENOTSOCK
+ * for a pipe fd cast to SOCKET, with no side effects on either kind and no CRT
+ * invalid-parameter abort (unlike _get_osfhandle on a socket value). */
+static inline bool DqliteWinFdIsSocket(int fd)
+{
+	int type;
+	int len = (int)sizeof type;
+	return getsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_TYPE,
+			  (char *)&type, &len) == 0;
+}
 
 /* Pipe-name prefix. A named pipe path component cannot contain a backslash. */
 #define DQLITE_WIN_PIPE_PREFIX "\\\\.\\pipe\\dqlite-"

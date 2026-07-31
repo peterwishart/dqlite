@@ -3,6 +3,9 @@
 #include "../raft.h"
 #include "assert.h"
 #include "transport.h"
+#ifdef _WIN32
+#include "dqlite_win_pipe.h" /* DqliteWinFdIsSocket */
+#endif
 
 /* Called to allocate a buffer for the next stream read. */
 static void alloc_cb(uv_handle_t *stream, size_t suggested_size, uv_buf_t *buf)
@@ -80,20 +83,12 @@ int transport__stream(struct uv_loop_s *loop,
 	int rv;
 
 #ifdef _WIN32
-	/* On Windows the incoming descriptor is one of two things:
-	 *
-	 *  - a Winsock SOCKET (the TCP transport widens it into an int). This is
-	 *    NOT a CRT file descriptor, so uv_guess_handle() -- which calls
-	 *    _get_osfhandle() internally -- returns UV_UNKNOWN_HANDLE for it.
-	 *  - a CRT file descriptor wrapping a named-pipe HANDLE (the local
-	 *    "@name" transport opens the pipe with CreateFile + _open_osfhandle).
-	 *    For a real CRT fd, uv_guess_handle() -> GetFileType() -> FILE_TYPE_PIPE
-	 *    returns UV_NAMED_PIPE.
-	 *
-	 * So UV_NAMED_PIPE unambiguously selects the pipe path; everything else
-	 * (i.e. UV_UNKNOWN_HANDLE for a raw SOCKET) is the TCP path, handed to
-	 * uv_tcp_open(), which takes a uv_os_sock_t (== SOCKET). */
-	if (uv_guess_handle(fd) == UV_NAMED_PIPE) {
+	/* On Windows the incoming descriptor is either a Winsock SOCKET widened
+	 * to int (the TCP transport) or a CRT fd wrapping a named-pipe HANDLE
+	 * (the local "@name" transport) -- see DqliteWinFdIsSocket(). A socket
+	 * goes to uv_tcp_open(), which takes a uv_os_sock_t (== SOCKET);
+	 * anything else is the pipe path (uv_pipe_open() takes the CRT fd). */
+	if (!DqliteWinFdIsSocket(fd)) {
 		pipe = raft_malloc(sizeof *pipe);
 		if (pipe == NULL) {
 			return DQLITE_NOMEM;

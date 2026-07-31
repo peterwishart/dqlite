@@ -788,7 +788,6 @@ int UvWriterInit(struct UvWriter *w,
 {
 	void *data = w->data;
 	int rv;
-	bool threadpool;
 
 	memset(w, 0, sizeof *w);
 	w->data = data;
@@ -824,14 +823,11 @@ int UvWriterInit(struct UvWriter *w,
 	 * (Windows, macOS, DQLITE_DISABLE_KAIO) have only the portable
 	 * backend. */
 #if defined(DQLITE_HAVE_KAIO)
-	threadpool = uvWriterThreadpoolForced();
-	w->backend =
-	    threadpool ? &uvWriterThreadpoolBackend : &uvWriterAioBackend;
+	w->backend = uvWriterThreadpoolForced() ? &uvWriterThreadpoolBackend
+						: &uvWriterAioBackend;
 #else
-	threadpool = true;
 	w->backend = &uvWriterThreadpoolBackend;
 #endif
-	w->threadpool = threadpool;
 
 	/* Set direct I/O if available. */
 	if (direct) {

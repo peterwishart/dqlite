@@ -1527,11 +1527,21 @@ behaviour change).
       backend" paragraph in `src/raft/uv_writer.c:12-28`.
       Keep `UNVERIFIED-NEEDS-MAC` markers as-is: they are deliberate,
       grep-able gates on the deferred macOS work, not stale WIP.
-- [ ] **C8 — Dead scaffolding.** Remove the write-only `UvWriter.threadpool`
-      field (`src/raft/uv_writer.h:29-30`, sole write
-      `src/raft/uv_writer.c:837`; dispatch uses `w->backend`). Deduplicate the
-      `fcntl` ENOSYS-stub explanation (`compat/win/compat_win.c:121-139` vs
-      `compat/win/dqlite_win_prelude.h:283-291` — keep one).
+- [x] **C8 — Dead scaffolding + fd-kind consolidation (review B-5d/e/f).
+      DONE 2026-07-31.** Write-only `UvWriter.threadpool` field removed
+      (selection feeds `w->backend` directly). The `fcntl` dedupe landed
+      with C4. Additionally executed the review's discriminator
+      consolidation: one canonical `DqliteWinFdIsSocket()` (getsockopt
+      SO_TYPE probe, in `dqlite_win_pipe.h`) now serves `protocol.c`,
+      `lib/transport.c` (replacing `uv_guess_handle`) and `transport.c`
+      (replacing both address-string tests — fd-based is robust against
+      custom connect functions). `server.c`'s bind dispatch keeps its
+      address test (no fd exists yet — it was never an fd discriminator).
+      Windows: unit 328/328; cluster/membership/client/server/fsm all green;
+      node suite 29/29 run individually (all except the known-hang
+      `stopInflightReads`), incl. the Inet/TCP paths. Linux at branch tip:
+      unit-test 324/324 (re-verified post-commit; transport edits are
+      `_WIN32`-only, Linux delta is the dead field alone).
 
 ### 12.3 Test coverage (automake stays authoritative on Linux)
 
