@@ -1330,3 +1330,252 @@ warnings catch substitution mistakes, then re-audit what is left of W7/W9.
       them), but an env var that silently changes a production binary's write
       mechanism is an operational footgun even with a warning. Raise in the
       first upstream PR that carries the switches rather than deciding here.
+
+## 12. Refinement checklist toward the Windows test candidate (2026-07-31)
+
+Sources: the comparative fork review (*"dqlite cross-platform forks —
+comparative analysis"*, 2026-07-30, artifact
+`https://claude.ai/code/artifact/97089a84-d612-412c-8404-9280a4557d2a` —
+this branch is its **Fork B**, findings B-1…B-5), plus three fresh audits of
+the working tree at `fbd33eb` vs `origin/main` (`ffae341`): review-finding
+verification, comment-delta audit, and automake test-coverage audit.
+
+**Goal for this round: the best candidate Windows build for further rounds of
+testing. Upstreaming is explicitly NOT the aim yet** — items that only matter
+for an upstream series are parked in §12.5. Ground rules from §11 still hold
+(Linux autotools files stay byte-identical to upstream; no silent Linux
+behaviour change).
+
+### 12.1 Correctness & behaviour (review findings, all re-verified in tree)
+
+- [ ] **R1 — Demotion tie order (review B-1, completes W6b).** The ascending-id
+      tie-break in `compareNodesForPromotion` (`src/roles.c:166-181`) is negated
+      by `compareNodesForDemotion` (`src/roles.c:184-188`, still `/* XXX */`),
+      so among fully-equivalent candidates Linux now demotes the **highest** id
+      where upstream (stable glibc `qsort_r`) demoted the **lowest** — at both
+      demotion call sites (`src/roles.c:322-333`, `:352-363`). The comment at
+      `:178-180` claiming "Linux results are unchanged" is wrong for demotion.
+      Do: give demotion its own comparator with an explicit lowest-id-first
+      tie-break (restoring upstream order), fix the comment, drop the `XXX`,
+      and add `adjust/demote_voter_tie_break` + `adjust/demote_standby_tie_break`
+      to `test/unit/test_role_management.c` (mirroring the promotion pair at
+      `:359`/`:377`).
+- [x] **R2 — Seed entropy (review B-4a): RESOLVED 2026-07-31, no change.**
+      `src/raft/uv.c:646` calls `uv_random(..., flags=0)` where upstream used
+      `getrandom(GRND_NONBLOCK)`. Precise semantics: libuv's Linux path is
+      `getrandom(flags=0)` and its fallbacks fire only on *error* (ENOSYS
+      etc.), so an uninitialized entropy pool blocks rather than diverting —
+      but that window is the first moments after boot only (modern kernels
+      init the crng in milliseconds via jitter entropy), the consumer is a
+      4-byte `srand()` seed, and the trade-off is already documented at the
+      call site (`src/raft/uv.c:637-644`). Accepted as-is.
+- [ ] **R3 — `base_vfs` lookup: keep `"unix"` on Linux (review B-4b).**
+      `src/vfs.c:777` uses `sqlite3_vfs_find(NULL)` (upstream: `"unix"`);
+      temp-file delegation (`src/vfs.c:2375-2384`) would silently follow an
+      embedder-registered custom default VFS. Use `NULL` only under `_WIN32`.
+- [ ] **R4 — Guard the test-heap `sqlite3_shutdown()` (review B-4c).**
+      `test/lib/heap.c:154` runs unconditionally; the 11-line rationale above
+      it is Windows-only (no-fork munit). Wrap in `#ifdef _WIN32` and shrink
+      the comment to 2-3 lines.
+- [ ] **R5 — Pipe-name truncation guard (review B-3b).** `DqliteWinPipeName`
+      (`compat/win/dqlite_win_pipe.h:56-75`) silently truncates at 127 chars,
+      so two long distinct `@` addresses can collide on one pipe. Make it
+      return an error (callers at `src/server.c:265`, `test/lib/server.c:25`,
+      `test/lib/endpoint.c:30`/`:311` must fail loudly), and add a small unit
+      test of the mapping incl. an over-long name — there is currently **no**
+      test of the mapping at all.
+- [ ] **R6 — `nanosleep` macro hygiene.** The shim at `compat/win/unistd.h:227`
+      double-evaluates `req` and silently discards `rem`. Convert to an inline
+      function (the implementation `dqliteWinNanosleep` already exists in
+      `compat/win/compat_win.c`).
+- [ ] **R7 — Decide `DqliteWinPipeReadTimed` EOF-vs-timeout (review B-3c).**
+      Returns 0 for both (`compat/win/dqlite_win_pipe.h:159`, `:169`);
+      `src/client/protocol.c:179-183` cannot distinguish. Either give timeout
+      a distinct negative return and handle it at the call site, or document
+      at the call site why conflation is safe for every current caller.
+      Cheap now, confusing during test-failure triage later — lean fix.
+
+### 12.2 Comment hygiene (delta vs upstream must be concise, correct, current)
+
+- [ ] **C1 — Fix the factually wrong comments** (all verified wrong):
+      - `test/lib/server.h:22-25`: claims Windows uses TCP loopback; the code
+        binds `"@%u"` over a named pipe unconditionally
+        (`test/lib/server.c:117-120`). Also shrink the now-pointless
+        `char address[24]` headroom or justify it honestly.
+      - `CMakeLists.txt:164-169`: "a full build will not yet compile/link" —
+        contradicted by the file's own header (`:11-21`).
+      - `CMakeLists.txt:92`: WIN32 dependency path described as "stubbed";
+        it is fully implemented at `:96-115`.
+      - `CMakeLists.txt:309`: advertises resolving `<pthread.h>`, a header
+        W9 deleted.
+      - `test/lib/endpoint.c:70-72`: claims `"unix"` "cannot bind on Windows"
+        while `:295-300` in the same file implements it over a pipe; state the
+        real reason the default is `tcp`.
+- [ ] **C2 — Delete the 12 no-op `#ifdef _WIN32` address blocks** (review B-5b;
+      count re-verified as 12, not 8): `test/integration/test_cluster.c:133-140`,
+      `:300-307`, `:350-357`; `test/integration/test_membership.c:87-94`,
+      `:137-144`, `:193-200`, `:266-273`, `:323-330`;
+      `test/integration/test_role_management.c:116-120`, `:131-135`,
+      `:146-150`, `:161-165`. Both arms are byte-equivalent (`"@<id>"`), and
+      the 8 attached comments assert a TCP-loopback behaviour that does not
+      exist. Pure deletion, restores these files to upstream text.
+- [ ] **C3 — Collapse the 16× duplicated shadowing-fence boilerplate.** The
+      same 6-line "Shadowing fence (PORT_TODO.md W3)…" block sits in all 16
+      shim headers (~96 lines); the `#error` string below it says the same
+      thing. Reduce to one line per header pointing at the full rationale in
+      `compat/win/dqlite_win_prelude.h`.
+- [ ] **C4 — Remove historical-narrative comments** describing what earlier
+      iterations of the port did wrong (they refer to work in progress on
+      this branch and are outdated by definition):
+      `compat/win/compat_win.c:56-81`, `:121-130`, `:224-248`;
+      `compat/win/dqlite_win_prelude.h:99-119`, `:283-291`;
+      `compat/win/unistd.h:72-78` ("HISTORY / CAUTION");
+      `src/raft/uv_fs.c:1295-1299` ("An earlier iteration had the opposite
+      problem…"); `src/raft.h:1408` (self-referential "retained as
+      documentation of intent"). Keep only the present-tense constraint each
+      one protects, in 1-3 lines.
+- [ ] **C5 — Deduplicate repeated rationale paragraphs** — one canonical home,
+      one-line cross-refs elsewhere:
+      - warn-once-on-stderr paragraph ×3: `src/raft/uv_fs.c:1237-1243`,
+        `src/raft/uv_writer.c:69-75`, `src/vfs.c:1912-1918`;
+      - `raft_aligned_alloc` platform caveat ×4: `src/raft.h:1386-1399`
+        (canonical — public contract), `src/raft/heap.c:31-35`,
+        `compat/win/dqlite_win_prelude.h:335-353`,
+        `test/raft/integration/test_heap.c:53-59`;
+      - backend-selection paragraph ×2: `test/raft/unit/test_uv_writer.c:10-16`,
+        `test/raft/integration/test_uv_append.c:11-16`;
+      - promotion tie-break rationale duplicated in
+        `test/unit/test_role_management.c:352-358` (canonical is
+        `src/roles.c:171-181`);
+      - SOCKET-vs-pipe discrimination ×4 (`src/lib/transport.c:83-95`,
+        `src/transport.c:80-84`, `src/client/protocol.c:22-29`,
+        `test/unit/ext/test_uv.c:11-23`) — largely resolved by R9/C7 below;
+      - `sem_getvalue`→`atomic_int` explained 3× in
+        `test/integration/test_node.c:369-375`/`:434-436`/`:451-456`.
+- [ ] **C6 — Make work-item codenames self-contained.** 34 comments across 25
+      code files cite `PORT_TODO.md W3/W5/W7a/W7b/W8`, `S1`, "section 9", or
+      `PORT_DESIGN.md`. Replace codename citations with the one-sentence fact
+      they stand for; keep at most the genuinely load-bearing
+      `PORT_DESIGN.md` pointers (e.g. `src/raft/uv_writer.c:59`,
+      `src/vfs.c:1902`) since those docs are committed on this branch. Also
+      resolve the undefined "route A"/"route B" shorthand at
+      `src/raft/uv_os.c:47`, `src/raft/uv_writer.c:634`/`:701`.
+- [ ] **C7 — Condense the worst long blocks** (>20 lines each; keep the
+      constraint, drop the essay): `compat/win/compat_win.c:1-29`, `:141-171`,
+      `:567-588`, `:792-812`; `compat/win/dqlite_win_prelude.h:1-29`;
+      `CMakeLists.txt:1-30` header + redundant `TODO(macos)` block at
+      `:155-158` (the `FATAL_ERROR` at `:160-162` already says it);
+      `src/raft/uv_fs.c:1275-1302`; `test/lib/win.c:1-22`;
+      `compat/win/sys/mman.h:1-20`; the speculative "future Windows IOCP
+      backend" paragraph in `src/raft/uv_writer.c:12-28`.
+      Keep `UNVERIFIED-NEEDS-MAC` markers as-is: they are deliberate,
+      grep-able gates on the deferred macOS work, not stale WIP.
+- [ ] **C8 — Dead scaffolding.** Remove the write-only `UvWriter.threadpool`
+      field (`src/raft/uv_writer.h:29-30`, sole write
+      `src/raft/uv_writer.c:837`; dispatch uses `w->backend`). Deduplicate the
+      `fcntl` ENOSYS-stub explanation (`compat/win/compat_win.c:121-139` vs
+      `compat/win/dqlite_win_prelude.h:283-291` — keep one).
+
+### 12.3 Test coverage (automake stays authoritative on Linux)
+
+Audit headline: `Makefile.am`/`configure.ac`/`.github/` are byte-identical to
+upstream, no test deleted, promotion-tie + `stress/read_write_heavy` tests are
+net additions. One marginal drop, several gaps.
+
+- [ ] **T1 — Undo the one real automake coverage drop.**
+      `test/raft/unit/test_uv_writer.c:431` (`UvWriterClose/aio`) added
+      `|| !f->async_io` to the skip; upstream ran the `RAFT_CANCELED`
+      assertion on `DirAioParams` filesystems that probe `async_io == false`
+      (tmpfs/ZFS via `RAFT_TMP_*`). Re-examine why it was added and narrow the
+      skip back to `uvThreadpoolBackend()` only, or record the precise reason
+      it cannot run.
+- [ ] **T2 — Run the automake build at branch tip on Linux.** The tree's
+      byte-identical-Makefile.am claim has never been *executed* on this
+      branch's code. Specific risk found: `test/raft/unit/test_compress.c:22-27`
+      now calls `uv_random()` directly, and `raft_core_unit_test_LDFLAGS`
+      (`Makefile.am:319`, LZ4 branch) overwrites `AM_LDFLAGS` and with it
+      `$(UV_LIBS)`. Do a full `autoreconf && ./configure && make check` on
+      WSL2 and record the result here.
+- [ ] **T3 — Exercise the portable paths in a default verification run.**
+      The three env switches are read but never set by anything
+      (`grep setenv/putenv test/` = empty; no CI): the threadpool writer
+      backend (`src/raft/uv_writer.c:695-770`), the no-mremap VFS fallback
+      (`src/vfs.c:1945-1951`, `:1986-1999`, `:2073-2097`, `:1756`) and the
+      forced-buffered path (`src/raft/uv_fs.c:1524`) are **dead code in a
+      default Linux `make check`** — and will show as a Codecov line-coverage
+      regression. Without touching `Makefile.am` (§11 ground rule), add extra
+      env-prefixed passes (`DQLITE_IO_BACKEND=threadpool …`,
+      `DQLITE_VFS_NO_MREMAP=1 …`, `DQLITE_IO_NO_DIRECT=1 …`) to CI and/or a
+      checked-in verification script that the runbooks call.
+- [ ] **T4 — Minimal CI (review B-2, absorbs the §9 GH-Actions item).** The
+      branch has zero CI; every verification number is a manual run, and the
+      "0 warnings" property is enforced by nobody. Smallest useful matrix:
+      (a) Linux autotools `make check` (proves T2 stays true),
+      (b) Linux CMake build + suite run with the T3 env passes,
+      (c) Windows clang-cl/vcpkg build + the natively-green suite subset,
+      (d) `-Werror` (or warning-count gate) on the CMake builds.
+      Trim the §9 wish-list (`{ubuntu, macos, windows} × clang`) to this;
+      macOS joins when the `elseif(APPLE)` stub is wired.
+- [ ] **T5 — Crash-durability test.** No kill-and-recover test exists anywhere
+      in `test/` (upstream or branch) — yet durability is this branch's
+      flagship claim (W1). Add one: append entries, confirm acknowledgement,
+      kill -9 the process/child, reopen the log dir, assert acknowledged
+      entries survive. Protects the KAIO path, the portable backend and the
+      Windows write-through+flush stack alike. (Review PR-plan #13 wants this
+      for upstream too; write it now, on this branch's CMake+automake harness.)
+- [ ] **T6 — Decide `stress/read_write_heavy` default-run policy.**
+      `test/integration/test_stress.c:266` (count=1500, writers=4, readers=32,
+      databases=4) is unguarded and now runs in every Linux `make check`,
+      materially lengthening it. Either accept (document expected runtime) or
+      gate behind an env opt-in like the other heavy diagnostics.
+
+### 12.4 Older PORT_TODO items — triage for this round
+
+- [ ] **P1 — DO: root-cause the Windows `node/stopInflightReads` hang**
+      (§11.4). The full `integration-test.exe` hang means the `node` suite as
+      a whole is unverified on Windows — directly blocks the "best candidate
+      build for testing" goal. Debugger session: product bug vs harness vs
+      machine.
+- [ ] **P2 — DO: diagnose the WSL `membership`/`client`
+      `dqlite_node_set_bind_address`=1 failures** (§11.4) so WSL is a
+      trustworthy Linux verification environment again; currently those two
+      suites are a blind spot in every WSL run (and in the T2/T3 runs above).
+- [ ] **P3 — DO (cheap): `AC_SYS_LARGEFILE` parity in CMake** (§1 leftover).
+      Add `_FILE_OFFSET_BITS=64` for the Linux CMake build so CMake-built
+      binaries match autotools on 32-bit hosts. The pthread-flags half of
+      that item is moot post-S1 (no pthread use left) — tick it as such.
+- [ ] **P4 — VERIFY, defer the rest: `test/lib/fs.c`/`test/raft/lib/dir.c`
+      helpers** (§9 leftover). Full loopback-filesystem porting is not
+      feasible on Windows; just confirm the plain-dir/tmpdir parameter sets
+      run (not skip) on Windows and count them in the run books.
+- [ ] **DEFER — upstream-story decision (autotools vs CMake, §1)**: only
+      matters when upstreaming resumes.
+- [ ] **DEFER — release-build fate of the three env switches (§11.4)**:
+      explicitly a maintainer question for the first upstream PR.
+- [ ] **DEFER — macOS items (§5 statfs probe, §7 AF_UNIX, CMake APPLE stub)**:
+      out of scope for the Windows candidate; `UNVERIFIED-NEEDS-MAC` markers
+      stay as the work-list.
+
+### 12.5 Parked for the upstream rounds (from the review, deliberate no-ops now)
+
+- **KAIO `EAGAIN` poll-queue ownership bug** (`src/raft/uv_writer.c:352-367`,
+  verified byte-identical to upstream): a real latent upstream bug (request
+  re-queued to the threadpool while still linked in `poll_queue`; close-path
+  assert at `:400` can trip). Fixing it here would break this branch's
+  keep-KAIO-byte-identical discipline — it is review PR-plan Phase-0 material
+  (#6). Track, don't touch.
+- **Pipe-transport two-tier carve-out** (first upstream PR = TCP-only,
+  `@name` → `DQLITE_MISUSE`): already planned in PORT_DESIGN.md (S2); the
+  pipe layer stays in for local testing rounds.
+- **Heap-backed shm provider (Fork A cross-pollination)**: a benchmark-backed
+  decision between placeholder-mmap (current) and heap copies belongs in the
+  upstream WAL-shm PR (review #18), not this round. Prereq worth doing
+  opportunistically: fixed-seed benchmark discipline to price the per-write
+  `FlushFileBuffers` and pipe-vs-TCP costs, both currently unmeasured.
+- **Writer file split** (`uv_writer_aio.c`/`uv_writer_threadpool.c`): cosmetic
+  refactor named in PORT_DESIGN.md as the eventual clean form; do it when the
+  upstream series is cut, not while stabilising the test candidate.
+- **History hygiene** (the "dummy change" commit, replayable series): rebase
+  concerns for the upstream series only.
+- **armv7 two-`uint32_t` stamp / Android findings (Fork A)**: no 32-bit
+  target on this branch's roadmap; revisit if one appears.
