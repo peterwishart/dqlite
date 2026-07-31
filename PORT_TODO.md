@@ -1381,10 +1381,11 @@ behaviour change).
       `"win32"` (SQLite's canonical Windows VFS) instead of `NULL`, so an
       embedder-registered custom default VFS is never silently followed
       anywhere. Windows unit-test 323/323, Linux automake 324/324.
-- [ ] **R4 — Guard the test-heap `sqlite3_shutdown()` (review B-4c).**
-      `test/lib/heap.c:154` runs unconditionally; the 11-line rationale above
-      it is Windows-only (no-fork munit). Wrap in `#ifdef _WIN32` and shrink
-      the comment to 2-3 lines.
+- [x] **R4 — Guard the test-heap `sqlite3_shutdown()` (review B-4c).
+      DONE 2026-07-31.** Wrapped in `#ifdef _WIN32`, comment 11→3 lines;
+      Linux path is now byte-identical to upstream. Windows unit-test
+      323/323 (fault-injection suite still gets its shutdown), Linux
+      automake 324/324.
 - [ ] **R5 — Pipe-name truncation guard (review B-3b).** `DqliteWinPipeName`
       (`compat/win/dqlite_win_pipe.h:56-75`) silently truncates at 127 chars,
       so two long distinct `@` addresses can collide on one pipe. Make it
