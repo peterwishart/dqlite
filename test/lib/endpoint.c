@@ -27,7 +27,8 @@ static int endpointConnectPipe(struct test_endpoint *e)
 	int osfd;
 	int attempts;
 
-	DqliteWinPipeName(e->address, pipe_name, sizeof pipe_name);
+	munit_assert_int(DqliteWinPipeName(e->address, pipe_name,
+					   sizeof pipe_name), ==, 0);
 
 	/* The listener is bound (uv_pipe_bind is synchronous) before this runs,
 	 * but give a short bounded retry for "busy"/"not yet there" to be
@@ -308,7 +309,8 @@ int test_endpoint_listen(struct test_endpoint *e,
 
 	munit_assert_int(e->family, ==, AF_UNIX);
 
-	DqliteWinPipeName(e->address, pipe_name, sizeof pipe_name);
+	munit_assert_int(DqliteWinPipeName(e->address, pipe_name,
+					   sizeof pipe_name), ==, 0);
 
 	/* raft_malloc so the caller can free with raft_free via uv_close,
 	 * exactly as for the stream produced by transport__stream(). */

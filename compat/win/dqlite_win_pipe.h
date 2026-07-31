@@ -50,28 +50,41 @@
  *
  * `at_address` is the dqlite address; a leading '@' (if present) is stripped.
  * The <name> is sanitized so it is a legal pipe-path component: the characters
- * that a pipe name may not contain ('\\', '/', ':') are folded to '_'. In the
- * dqlite tests <name> is a small integer ("@1", "@123"), so sanitization is
- * belt-and-suspenders. `out_len` should be at least 256. */
-static inline void DqliteWinPipeName(const char *at_address,
-				     char *out,
-				     size_t out_len)
+ * that a pipe name may not contain ('\\', '/', ':') are folded to '_'.
+ *
+ * Returns 0 on success, -1 if prefix + sanitized name + NUL does not fit in
+ * `out_len` bytes. The path is NEVER truncated: truncation would silently
+ * collide two distinct long addresses on one pipe, so an over-long address is
+ * an error instead (`out` is set to "" so it cannot be used as a path). All
+ * callers pass 256-byte buffers, matching the Win32 pipe-name limit. */
+static inline int DqliteWinPipeName(const char *at_address,
+				    char *out,
+				    size_t out_len)
 {
 	const char *name = (at_address[0] == '@') ? at_address + 1 : at_address;
-	char sanitized[128];
+	const size_t prefix_len = sizeof(DQLITE_WIN_PIPE_PREFIX) - 1;
 	size_t i;
 
-	for (i = 0; name[i] != '\0' && i + 1 < sizeof(sanitized); i++) {
+	if (out_len < prefix_len + 1) {
+		if (out_len > 0) {
+			out[0] = '\0';
+		}
+		return -1;
+	}
+	memcpy(out, DQLITE_WIN_PIPE_PREFIX, prefix_len);
+	for (i = 0; name[i] != '\0'; i++) {
 		char c = name[i];
+		if (prefix_len + i + 1 >= out_len) {
+			out[0] = '\0';
+			return -1;
+		}
 		if (c == '\\' || c == '/' || c == ':') {
 			c = '_';
 		}
-		sanitized[i] = c;
+		out[prefix_len + i] = c;
 	}
-	sanitized[i] = '\0';
-
-	_snprintf(out, out_len, "%s%s", DQLITE_WIN_PIPE_PREFIX, sanitized);
-	out[out_len - 1] = '\0';
+	out[prefix_len + i] = '\0';
+	return 0;
 }
 
 /*

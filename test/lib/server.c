@@ -22,7 +22,8 @@ static int endpointConnectPipe(const char *address, int *fd)
 	int osfd;
 	int attempts;
 
-	DqliteWinPipeName(address, pipe_name, sizeof pipe_name);
+	munit_assert_int(DqliteWinPipeName(address, pipe_name,
+					   sizeof pipe_name), ==, 0);
 
 	/* Open the pipe. A "not found" here means the peer has not reached
 	 * uv_listen() yet: fail FAST and let the caller retry, exactly as a

@@ -520,6 +520,11 @@ if(DQLITE_BUILD_TESTS)
     test/unit/main.c)
   target_compile_definitions(unit-test PRIVATE RAFT_API=)
   target_link_libraries(unit-test PRIVATE dqlite_raft)
+  if(WIN32)
+    # Windows-only unit tests for the compat/win named-pipe address mapping.
+    # CMake-only, like test/lib/win.c: the autotools build never sees it.
+    target_sources(unit-test PRIVATE test/unit/test_win_pipe.c)
+  endif()
 
   # integration-test: links the full library.
   dqlite_test(integration-test

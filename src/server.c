@@ -262,7 +262,15 @@ static int dqliteNodeBindPipe(dqlite_node *t, const char *address)
 		address = synth;
 	}
 
-	DqliteWinPipeName(address, pipe_name, sizeof pipe_name);
+	if (DqliteWinPipeName(address, pipe_name, sizeof pipe_name) != 0) {
+		/* Refuse over-long addresses rather than truncating: a
+		 * truncated path would silently collide two distinct
+		 * addresses on one pipe. */
+		snprintf(t->errmsg, DQLITE_ERRMSG_BUF_SIZE,
+			 "local address is too long for a named pipe: %s",
+			 address);
+		return DQLITE_MISUSE;
+	}
 
 	pipe = raft_malloc(sizeof *pipe);
 	if (pipe == NULL) {

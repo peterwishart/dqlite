@@ -1386,13 +1386,16 @@ behaviour change).
       Linux path is now byte-identical to upstream. Windows unit-test
       323/323 (fault-injection suite still gets its shutdown), Linux
       automake 324/324.
-- [ ] **R5 — Pipe-name truncation guard (review B-3b).** `DqliteWinPipeName`
-      (`compat/win/dqlite_win_pipe.h:56-75`) silently truncates at 127 chars,
-      so two long distinct `@` addresses can collide on one pipe. Make it
-      return an error (callers at `src/server.c:265`, `test/lib/server.c:25`,
-      `test/lib/endpoint.c:30`/`:311` must fail loudly), and add a small unit
-      test of the mapping incl. an over-long name — there is currently **no**
-      test of the mapping at all.
+- [x] **R5 — Pipe-name truncation guard (review B-3b). DONE 2026-07-31.**
+      `DqliteWinPipeName` now returns int and never truncates: sanitization
+      writes directly into the caller's buffer, over-long names error with
+      `out=""` (the intermediate 128-byte buffer and `_snprintf` are gone, so
+      names up to 239 chars now map distinctly). Bind path returns
+      `DQLITE_MISUSE` + errmsg; harness callers munit-assert. New CMake-only
+      `test/unit/test_win_pipe.c` (5 cases incl. exact-fit boundary and the
+      distinct-long-names collision case) — first coverage of the mapping.
+      Windows unit-test 328/328, integration cluster 23/23 + membership 5/5
+      over pipes; Linux automake 324/324 (untouched).
 - [ ] **R6 — `nanosleep` macro hygiene.** The shim at `compat/win/unistd.h:227`
       double-evaluates `req` and silently discards `rem`. Convert to an inline
       function (the implementation `dqliteWinNanosleep` already exists in
