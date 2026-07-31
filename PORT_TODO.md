@@ -1436,7 +1436,13 @@ behaviour change).
       - `test/lib/endpoint.c:70-72`: claims `"unix"` "cannot bind on Windows"
         while `:295-300` in the same file implements it over a pipe; state the
         real reason the default is `tcp`.
-- [ ] **C2 — Delete the 12 no-op `#ifdef _WIN32` address blocks** (review B-5b;
+- [x] **C2 — Delete the 12 no-op `#ifdef _WIN32` address blocks. DONE
+      2026-07-31.** All 12 verified byte-equivalent (fixture always formats
+      `"@%u"`) and removed; the three files are now **byte-identical to
+      origin/main** (`git diff origin/main` empty). Windows cluster 23/23,
+      membership 5/5, role_management 1/1 over pipes; same counts on WSL —
+      where membership 5/5 passed this run, so the §11.4 P2 environmental
+      failure is intermittent, not constant. (review B-5b;
       count re-verified as 12, not 8): `test/integration/test_cluster.c:133-140`,
       `:300-307`, `:350-357`; `test/integration/test_membership.c:87-94`,
       `:137-144`, `:193-200`, `:266-273`, `:323-330`;

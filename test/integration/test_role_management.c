@@ -113,11 +113,7 @@ TEST(role_management, promote, setUp, tearDown, 0, role_management_params)
 	HANDSHAKE;
 
 	id = 2;
-#ifdef _WIN32
-	address = f->servers[id - 1].address;
-#else
 	address = "@2";
-#endif
 	ADD(id, address);
 	for (tries = 0; tries < TRIES && !hasRole(f, 2, DQLITE_VOTER);
 	     tries += 1) {
@@ -128,11 +124,7 @@ TEST(role_management, promote, setUp, tearDown, 0, role_management_params)
 	};
 
 	id = 3;
-#ifdef _WIN32
-	address = f->servers[id - 1].address;
-#else
 	address = "@3";
-#endif
 	ADD(id, address);
 	for (tries = 0; tries < TRIES && !hasRole(f, 3, DQLITE_VOTER);
 	     tries += 1) {
@@ -143,11 +135,7 @@ TEST(role_management, promote, setUp, tearDown, 0, role_management_params)
 	};
 
 	id = 4;
-#ifdef _WIN32
-	address = f->servers[id - 1].address;
-#else
 	address = "@4";
-#endif
 	ADD(id, address);
 	for (tries = 0; tries < TRIES && !hasRole(f, 4, DQLITE_STANDBY);
 	     tries += 1) {
@@ -158,11 +146,7 @@ TEST(role_management, promote, setUp, tearDown, 0, role_management_params)
 	};
 
 	id = 5;
-#ifdef _WIN32
-	address = f->servers[id - 1].address;
-#else
 	address = "@5";
-#endif
 	ADD(id, address);
 	for (tries = 0; tries < TRIES && !hasRole(f, 5, DQLITE_STANDBY);
 	     tries += 1) {
