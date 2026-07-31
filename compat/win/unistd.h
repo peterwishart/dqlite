@@ -62,15 +62,9 @@ typedef unsigned short mode_t;
  * src/lib/buffer.c (buffer__init), which uses it as the query row-batch flush
  * threshold in query__batch() and therefore must see the same 4KiB value as
  * Linux (plus the test mirrors of that math in test/unit/lib/test_buffer.c
- * and test/unit/test_gateway.c).
- *
- * HISTORY / CAUTION: an earlier version of this shim lied and returned
- * dwAllocationGranularity (64KiB) because src/vfs.c needs that value for
- * WAL-index mmap alignment. That lie leaked into buffer.c's flush threshold
- * and changed the observable query pause/resume boundary (bug #10 in
- * PORT_TODO.md, concurrency/delete failures). sysconf now tells the truth;
- * code that needs the mapping-alignment unit must ask for it by name via
- * dqlite_win_allocation_granularity() below. */
+ * and test/unit/test_gateway.c). Do NOT return the 64KiB allocation
+ * granularity here: code that needs the mapping-alignment unit must ask for
+ * it by name via dqlite_win_allocation_granularity() below. */
 #define _SC_PAGESIZE 1
 #define _SC_PAGE_SIZE _SC_PAGESIZE
 

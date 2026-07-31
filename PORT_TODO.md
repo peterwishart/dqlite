@@ -1460,7 +1460,11 @@ behaviour change).
       shim headers (~96 lines); the `#error` string below it says the same
       thing. Reduce to one line per header pointing at the full rationale in
       `compat/win/dqlite_win_prelude.h`.
-- [ ] **C4 — Remove historical-narrative comments** describing what earlier
+- [x] **C4 — Remove historical-narrative comments. DONE 2026-07-31.** All 7
+      sites reduced to their present-tense constraint (net −37 lines; the
+      prelude's fcntl duplicate shrunk too). Windows unit-test 328/328;
+      Linux automake 324/324 (raft.h/uv_fs.c changes comment-only,
+      verified). Originally: describing what earlier
       iterations of the port did wrong (they refer to work in progress on
       this branch and are outdated by definition):
       `compat/win/compat_win.c:56-81`, `:121-130`, `:224-248`;

@@ -111,11 +111,9 @@ typedef SSIZE_T ssize_t;
  * SSIZE_MAX (src/server.c, dqlite_server_start) casts up to int64_t. The
  * remaining off_t-typed values in the tree (raft metadata/segment file sizes,
  * the WAL-index shm file size in vfs.c) are all far below 2 GiB by
- * construction. An earlier iteration instead pre-defined the UCRT guard macro
- * _OFF_T_DEFINED and typedef'ed off_t as __int64; that masked the root cause
- * of the server.c truncation bug and hijacked a CRT-internal guard, risking a
- * silent type mismatch with any UCRT or third-party header that disagreed
- * (PORT_TODO.md W5), so it was removed.
+ * construction. Do NOT pre-define the CRT-internal guard _OFF_T_DEFINED to
+ * widen off_t: that risks a silent type mismatch with any UCRT or third-party
+ * header that disagrees.
  */
 #include <sys/types.h>
 
@@ -282,13 +280,9 @@ typedef unsigned short sa_family_t;
 
 /* fcntl(2): declare the descriptor-flag commands and the function itself so
  * POSIX-shaped code compiles. The Windows implementation (compat_win.c)
- * implements NO command: it always fails with ENOSYS, because there is no
- * Win32 per-fd equivalent of the F_GETFL/F_SETFL status flags and lying
- * "success" bred false positives (PORT_TODO.md W5). No Windows-compiled code
- * calls it today: the sites that use fcntl() on other platforms are compiled
- * out here (test/lib/endpoint.c sets non-blocking mode via
- * ioctlsocket(FIONBIO) in its _WIN32 branch, and UvOsSetDirectIo takes its
- * no-O_DIRECT branch -- see above). */
+ * implements NO command -- every call fails with ENOSYS -- and no
+ * Windows-compiled code calls it (the POSIX call sites are compiled out
+ * here). */
 #ifndef F_GETFD
 #define F_GETFD 1
 #define F_SETFD 2

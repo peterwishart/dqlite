@@ -1292,11 +1292,6 @@ static int probeDirectIO(int fd, size_t *size, char *errmsg)
 	 * compat fcntl() fails every command with ENOSYS, so UvOsSetDirectIo()
 	 * reports UV_ENOTSUP -- which the `rv != UV_EINVAL` check below would
 	 * escalate to RAFT_IOERR rather than treat as "direct I/O unavailable".
-	 * (An earlier iteration had the opposite problem: O_DIRECT was 0 and
-	 * fcntl() lied success, so the probe would have reported direct_io =
-	 * true; this early return existed to neutralise that false positive --
-	 * see PORT_TODO.md W5. It is kept because it is the semantically correct
-	 * Windows answer, not because anything still lies.)
 	 * GetVolumeInformation()-based filesystem-type detection is therefore
 	 * unnecessary: it would only matter for deciding direct-I/O
 	 * compatibility, which Windows never uses. */

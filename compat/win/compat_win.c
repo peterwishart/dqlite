@@ -63,15 +63,9 @@
  * dqlite_server_create, through one of which every socket-using code path in
  * the library is reached -- call this helper (declared in the forced prelude,
  * so the guarded call sites in src/server.c need no extra include), making
- * Winsock initialisation STRUCTURAL rather than a side effect of linking.
- *
- * An earlier iteration did the WSAStartup in a library constructor in this
- * file instead. That only ran if the linker happened to pull compat_win.obj
- * out of the static archive to resolve some other symbol, and the same
- * constructor also mutated host-process-global CRT abort/report state that
- * belongs to the TEST harness, not to a library embedded in someone else's
- * process (PORT_TODO.md W8). The CRT quieting now lives in test/lib/win.c,
- * linked into test binaries only.
+ * Winsock initialisation STRUCTURAL rather than a side effect of linking: it
+ * is NOT a library constructor, so it cannot depend on whether the linker
+ * happens to pull this object out of the static archive.
  *
  * One-shot rather than refcounted: WSAStartup runs exactly once per process
  * (INIT_ONCE) and the matching WSACleanup is intentionally omitted. Process
@@ -118,16 +112,10 @@ void dqliteWinSocketsInit(void)
 
 /* ------------------------------------------------------------------ fcntl */
 
-/* Honest stub: NO fcntl command is implemented, so every call fails with
- * ENOSYS. Win32 has no per-fd equivalent of the F_GETFL/F_SETFL status flags
- * (non-blocking mode on a socket needs ioctlsocket(FIONBIO), which the one
- * former caller, test/lib/endpoint.c, now uses directly in its _WIN32 branch),
- * and an earlier version that returned success for every command while doing
- * nothing made UvOsSetDirectIo() report a direct-I/O "success" that
- * probeDirectIO() (src/raft/uv_fs.c) had to neutralise (PORT_TODO.md W5).
- * The definition exists only to back the prelude's declaration; if a future
- * caller genuinely needs a command, implement THAT command's real semantics
- * here rather than widening the success path. */
+/* Honest stub: implements NO fcntl command -- every call fails with ENOSYS.
+ * No Windows-compiled code calls it; the definition exists only to back the
+ * prelude's declaration. A future caller must implement its command's real
+ * semantics here rather than widening the success path. */
 int fcntl(int fd, int cmd, ...)
 {
 	(void)fd;
@@ -221,27 +209,19 @@ int dqliteWinNanosleep(long long sec, long long nsec)
 
 /* ----------------------------------------------------------- pread/pwrite */
 
-/* Positional I/O on a CRT fd via ReadFile/WriteFile with an OVERLAPPED offset.
+/* Positional I/O on a CRT fd via ReadFile/WriteFile with an OVERLAPPED
+ * offset: the offset travels IN the call, so the transfer neither depends on
+ * nor mutates the fd's shared file position. Current callers are all
+ * single-threaded per fd anyway (audited in PORT_TODO.md W7b).
  *
- * The previous shim was _lseeki64+_read/_write: two steps that mutate the
- * fd's shared file offset, so (unlike POSIX pread/pwrite) it was neither
- * atomic against a concurrent same-fd user nor position-preserving. Every
- * current caller is single-threaded per fd (audited for PORT_TODO.md W7b:
- * dqlite_server_start's info/store fds are function-local; vfs.c's WAL-shm fd
- * writes are serialized under the exclusive WAL write lock; the raft
- * fallocate-emulation fd is owned by one threadpool worker; the
- * test_compress.c fd is test-local), but that invariant was load-bearing and
- * unstated. This implementation removes it: the offset travels IN the
- * ReadFile/WriteFile call.
- *
- * One Windows wrinkle remains: on a handle opened for synchronous I/O (all
- * CRT fds), ReadFile/WriteFile with an OVERLAPPED offset still ADVANCES the
- * handle's file position after the transfer. POSIX pread/pwrite must not move
- * it, so we save and restore the position around the call (the same approach
- * libuv's uv_fs_read takes). The save/restore itself would race a concurrent
- * same-fd seek/read -- true POSIX offset-invisibility for multithreaded fd
- * sharing would need FILE_FLAG_OVERLAPPED handles end to end -- but the
- * transfer itself is now positional either way.
+ * One Windows wrinkle: on a handle opened for synchronous I/O (all CRT fds),
+ * ReadFile/WriteFile with an OVERLAPPED offset still ADVANCES the handle's
+ * file position after the transfer. POSIX pread/pwrite must not move it, so
+ * we save and restore the position around the call (the same approach libuv's
+ * uv_fs_read takes). The save/restore itself would race a concurrent same-fd
+ * seek/read -- true POSIX offset-invisibility for multithreaded fd sharing
+ * would need FILE_FLAG_OVERLAPPED handles end to end -- but the transfer
+ * itself is positional either way.
  *
  * Note these are raw-byte transfers: no CRT text-mode CRLF translation is
  * applied regardless of the fd's _O_TEXT/_O_BINARY mode (dqlite opens all
