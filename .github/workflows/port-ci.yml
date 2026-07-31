@@ -210,17 +210,31 @@ jobs:
           cmake --version | head -1
           ninja --version
 
-      # The manifest's builtin-baseline must exist in the runner's vcpkg
-      # clone; the image's C:\vcpkg checkout can lag or be shallow.
-      - name: Ensure vcpkg baseline commit is available
+      # Pin the runner's vcpkg clone -- working tree AND bootstrapped tool --
+      # to the manifest's builtin-baseline. Merely having the baseline commit
+      # present is NOT enough: the image's checkout drifts with every image
+      # update, and a checkout newer than the baseline makes the vcpkg tool
+      # inject its helper ports (vcpkg-cmake-config, ...) at versions the
+      # baseline's version database has never heard of:
+      #   "error: no version database entry for vcpkg-cmake-config at <date>"
+      # Checking out the baseline keeps tool, ports tree and version database
+      # coherent regardless of image drift.
+      - name: Pin vcpkg to the manifest baseline
+        shell: pwsh
         run: |
-          baseline=$(jq -r '."builtin-baseline"' vcpkg.json)
-          echo "builtin-baseline: $baseline"
-          if ! git -C "$VCPKG_INSTALLATION_ROOT" cat-file -e "$baseline^{commit}" 2>/dev/null; then
-            echo "baseline not present, fetching..."
-            git -C "$VCPKG_INSTALLATION_ROOT" fetch origin master
-            git -C "$VCPKG_INSTALLATION_ROOT" cat-file -e "$baseline^{commit}"
-          fi
+          $baseline = (Get-Content vcpkg.json | ConvertFrom-Json).'builtin-baseline'
+          Write-Host "builtin-baseline: $baseline"
+          git -C $env:VCPKG_INSTALLATION_ROOT cat-file -e "$baseline^{commit}" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            git -C $env:VCPKG_INSTALLATION_ROOT fetch origin $baseline
+            if ($LASTEXITCODE -ne 0) {
+              git -C $env:VCPKG_INSTALLATION_ROOT fetch origin master
+            }
+          }
+          git -C $env:VCPKG_INSTALLATION_ROOT checkout --force $baseline
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "$env:VCPKG_INSTALLATION_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4

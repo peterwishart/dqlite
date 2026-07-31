@@ -1614,7 +1614,15 @@ net additions. One marginal drop, several gaps.
       (`run_stress`). All four pre-push checks passed on this machine:
       Linux-clang -Werror quadrant zero warnings; nokaio dry run green;
       Windows /WX 411/411 targets clean; codespell zero hits. Pre-push
-      verification also caught and fixed TWO latent test bugs: (1)
+      First-push validation (2026-07-31, run 30670369266) caught one real
+      environment mismatch: the runner image's `C:\vcpkg` checkout is far
+      newer than the manifest's `builtin-baseline`, so the tool injected
+      `vcpkg-cmake-config@2026-07-21`, absent from the baseline's version
+      database ("no version database entry"). The baseline-guard step only
+      ensured the commit *existed*; it now checks out the baseline and
+      re-bootstraps the tool, keeping tool/ports/version-DB coherent under
+      image drift (the trailing "Ninja not found" was cascade noise).
+      Pre-push verification also caught and fixed TWO latent test bugs: (1)
       `CMAKE_C_VISIBILITY_PRESET hidden` compiled the ADDRINFO
       getaddrinfo-interposition as `.hidden`, silently disabling the DNS
       injection tests in EVERY CMake Linux build (per-file
