@@ -1602,7 +1602,9 @@ net additions. One marginal drop, several gaps.
       env-prefixed passes (`DQLITE_IO_BACKEND=threadpool …`,
       `DQLITE_VFS_NO_MREMAP=1 …`, `DQLITE_IO_NO_DIRECT=1 …`) to CI and/or a
       checked-in verification script that the runbooks call.
-- [ ] **T4 — Minimal CI (review B-2, absorbs the §9 GH-Actions item).** The
+- [ ] **T4 — Minimal CI (review B-2, absorbs the §9 GH-Actions item).**
+      *INVESTIGATED 2026-07-31 — full design + draft workflow in §12.6;
+      execution pending (after P1/P2 fixes).* The
       branch has zero CI; every verification number is a manual run, and the
       "0 warnings" property is enforced by nobody. Smallest useful matrix:
       (a) Linux autotools `make check` (proves T2 stays true),
@@ -1639,15 +1641,15 @@ net additions. One marginal drop, several gaps.
 
 ### 12.4 Older PORT_TODO items — triage for this round
 
-- [ ] **P1 — DO: root-cause the Windows `node/stopInflightReads` hang**
-      (§11.4). The full `integration-test.exe` hang means the `node` suite as
-      a whole is unverified on Windows — directly blocks the "best candidate
-      build for testing" goal. Debugger session: product bug vs harness vs
-      machine.
-- [ ] **P2 — DO: diagnose the WSL `membership`/`client`
-      `dqlite_node_set_bind_address`=1 failures** (§11.4) so WSL is a
-      trustworthy Linux verification environment again; currently those two
-      suites are a blind spot in every WSL run (and in the T2/T3 runs above).
+- [ ] **P1 — root-cause the Windows `node/stopInflightReads` hang** (§11.4).
+      *ROOT-CAUSED 2026-07-31: platform-independent PRODUCT deadlock in the
+      shutdown path (write-parked exec vs deferred close) — full analysis,
+      deterministic repro and fix plan in §12.6; fix in progress.*
+- [ ] **P2 — diagnose the WSL `membership`/`client`
+      `dqlite_node_set_bind_address`=1 failures** (§11.4).
+      *ROOT-CAUSED 2026-07-31: abstract-socket name collision with any
+      concurrent/leaked process holding `@1`…`@5` (EADDRINUSE, errno-proven)
+      — analysis and harness fix plan in §12.6; fix in progress.*
 - [x] **P3 — `AC_SYS_LARGEFILE` parity in CMake. RESOLVED 2026-07-31: already
       at parity, no change.** The Linux CMake branch has always appended
       `_GNU_SOURCE _FILE_OFFSET_BITS=64` to `DQLITE_PLATFORM_DEFS`, applied
@@ -1703,3 +1705,97 @@ net additions. One marginal drop, several gaps.
   concerns for the upstream series only.
 - **armv7 two-`uint32_t` stamp / Android findings (Fork A)**: no 32-bit
   target on this branch's roadmap; revisit if one appears.
+
+### 12.6 T4/P1/P2 investigations — root causes and fix plans (2026-07-31)
+
+All three investigated in parallel at tip `e3d6978`; plans below are the
+execution contract. Order of execution: P2 → P1 → T4 (P2 de-flakes the
+environment P1's fix is verified in; T4's workflow shape depends on whether
+P1's fix makes the full Windows integration binary trustworthy).
+
+**P1 — `node/stopInflightReads` hang: PRODUCT BUG, platform-independent
+shutdown deadlock (root-caused, stack-proven).**
+- Mechanism: rows streaming is write-driven (`query_work_done` sends one
+  `ROWS_PART` batch and parks the exec in `EXEC_RUNNING` until the socket
+  write completes). If the client stops draining, the write pends forever.
+  `dqlite_node_stop` → `gateway__close` sees `req != NULL` → DEFERS the
+  transport close until the exec finishes; `interrupt()` →
+  `leader_exec_abort` in `EXEC_RUNNING` only installs a
+  `sqlite3_progress_handler` — but nothing is executing on the threadpool
+  for a write-parked exec, so it never fires. Circular wait: exec waits on
+  write; write waits on close; close waits on exec. Stacks: main thread in
+  `uv_thread_join`, loop idle in `GetQueuedCompletionStatusEx`, all workers
+  idle.
+- Trigger window: any asymmetric slowdown of the consumer side (ASan, /Od,
+  disk/AV churn) tips connections into the parked-write state — why the
+  full-run hang was historically "reliable" here yet passes at tip on an
+  idle machine. Deterministic repro found: force server `SO_SNDBUF` to 4KB
+  → hang 2/2. Not munit no-fork, not Windows-specific, predates R7.
+- Fix: make `interrupt()` unpark a write-parked exec. (1) add
+  `bool awaiting_write` to `struct gateway`; (2) set it in
+  `query_work_done` after the `ROWS_PART` `SUCCESS`, clear it at the top of
+  `gateway__resume`; (3) in `interrupt()`, if `awaiting_write` and a live
+  exec: clear flag, `sqlite3_reset(stmt)`, `leader_exec_resume(exec)` —
+  mirrors the proven cancellation branch in `query_work_done`. Close then
+  proceeds: `EXEC_DONE` → `gateway_finalize` → `uv_close` cancels the
+  parked write → `conn_write_cb(UV_ECANCELED)` no-ops. The close path
+  never touches the write buffer (`handle_query_done_cb` short-circuits
+  when `close_cb != NULL`), so the resume is safe.
+- Verify: small-SNDBUF repro must go hang→pass (~20/20); full
+  integration-test on both platforms; ASan/valgrind on Linux for the new
+  resume path (double-resume/UAF is the hazard the flag exists to prevent);
+  ideally a permanent regression variant that forces the parked-write state
+  from the test side. This is an upstream bug worth reporting independently
+  of the port.
+
+**P2 — WSL `membership`/`client` bind failures: HARNESS DESIGN, abstract-
+socket name collision (root-caused, errno-proven).**
+- `test_server_setup` binds fixed machine-global abstract names
+  (`sprintf("@%u", id)` → `@1`…`@5`). Any second live process in the same
+  namespace — a concurrent test run, or a hung child leaked by an aborted
+  run — collides: `bind()` = `EADDRINUSE` (errno 98 captured via LD_PRELOAD
+  shim) → `dqlite_node_set_bind_address` returns 1 →
+  `test/lib/server.c:160` asserts. Reproduces instantly with two
+  concurrent runs; 0/5 membership with a persistent holder; sequential
+  clean-namespace runs pass 125/125. Not a product bug, not a WSL quirk;
+  upstream harness has the same design.
+- Fix: collision-proof harness addresses — `address[8]`→`[64]`,
+  `"@dqlite-<pid>-<id>"` (pid unique per forked test child on Linux), and
+  replace the hard-coded `"@2"`-style literals with the fixture's address
+  in test_membership.c (×5), test_cluster.c (×3), test_role_management.c,
+  test_node.c. The string is opaque everywhere (verified); Windows pipe
+  mapping handles arbitrary names in 256-byte buffers, so this also
+  de-flakes concurrent Windows runs. Residual follow-up (separate):
+  `test/integration/test_server.c` fixed TCP ports 8880-8882 are the same
+  collision class.
+- Runbook interim: `pgrep -af integration-test` + `ss -xl | grep ' @[0-9]'`
+  before WSL runs; never overlap two runs in one distro.
+
+**T4 — CI: designed; execution = pre-push checks + one new workflow file.**
+- Upstream workflows stay byte-identical and already cover the autotools
+  leg on every push (build-and-test 8-job matrix + latest-deps + static +
+  nolz4 + test-tracing); found: upstream's clang-format lint step matches 0
+  files (de-facto no-op) but codespell WILL scan the new port files —
+  pre-push check needed. cla-check may fail on fork PRs (cosmetic,
+  UI-disable).
+- New `.github/workflows/port-ci.yml`, triggers: push/PR to
+  pw_windows_tests + workflow_dispatch (`run_stress` input; cron only fires
+  from the default branch, so nightly is deferred). Jobs: (1)
+  `upstream-parity` — mechanical `git diff --diff-filter=MD` vs the
+  canonical merge-base over Makefile.am/configure.ac/ac//.github; (2)
+  `linux-cmake` — ubuntu-24.04, clang, `-DCMAKE_COMPILE_WARNING_AS_ERROR=ON`,
+  all binaries + integration with SKIP_STRESS=1 + `portable-check.sh`;
+  (3) `linux-cmake-nokaio` — `DQLITE_DISABLE_KAIO=ON` build AND run of the
+  uv suites (compiles+executes the `#else` arms, closing coverage gap 6);
+  (4) `windows-cmake` — windows-2022, msvc-dev-cmd, pinned
+  `C:/Program Files/LLVM/bin/clang-cl.exe`, vcpkg manifest with file-based
+  binary cache (`VCPKG_DEFAULT_BINARY_CACHE` + actions/cache; not x-gha),
+  release-bin DLL path only (avoid debug uv.dll), per-suite integration
+  runs with `timeout` — node suite enumerated via `--list` minus the P1
+  test until the P1 fix proves the full binary trustworthy. Stress legs
+  dispatch-only.
+- Pre-push verification (this machine): Linux-clang CMake build under
+  `-Werror` (the one unverified 0-warnings quadrant), Windows rebuild under
+  `/WX`, codespell over the tree, node `--list` smoke. Real semantic
+  validation happens on the first push (`gh run list`); Actions must be
+  enabled on the fork.
