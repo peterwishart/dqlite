@@ -1234,13 +1234,8 @@ static bool uvFsNoDirectIo(void)
 	const char *env = getenv("DQLITE_IO_NO_DIRECT");
 	bool forced = env != NULL && env[0] != '\0';
 	if (forced) {
-		/* This switch silently changes the write mechanism of a
-		 * production binary, so honouring it must never be silent:
-		 * warn once, unconditionally on stderr. The tracing paths
-		 * (dqlite's LIBDQLITE_TRACE, raft's per-instance tracer) are
-		 * opt-in and disabled in normal operation, so they cannot be
-		 * relied on to reach an operator. A benign race on the flag
-		 * can at worst print the warning twice. */
+		/* Warn once, unconditionally on stderr; rationale at
+		 * uvWriterThreadpoolForced() in uv_writer.c. */
 		static bool warned = false;
 		if (!warned) {
 			warned = true;

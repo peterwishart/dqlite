@@ -50,13 +50,10 @@ TEST(raft_heap, aligned_alloc, NULL, NULL, 0, NULL)
 #ifndef _WIN32
     munit_assert_int((uintptr_t)p % 1024, ==, 0);
 #else
-    /* On Windows the requested alignment is deliberately NOT honoured:
-     * aligned_alloc() maps to plain malloc() because _aligned_malloc() memory
-     * cannot be released with free() as raft's call sites (and C11) require,
-     * and over-alignment is only needed for O_DIRECT, which is unused on
-     * Windows. See raft_aligned_alloc() in src/raft.h. Pin the relaxed
-     * contract instead: the block must carry malloc's fundamental alignment
-     * (MEMORY_ALLOCATION_ALIGNMENT, 16 bytes on x64/arm64). */
+    /* On Windows the requested alignment is deliberately NOT honoured (see
+     * raft_aligned_alloc() in src/raft.h); pin the relaxed contract instead:
+     * malloc's fundamental alignment (MEMORY_ALLOCATION_ALIGNMENT, 16 bytes
+     * on x64/arm64). */
     munit_assert_int((uintptr_t)p % MEMORY_ALLOCATION_ALIGNMENT, ==, 0);
 #endif
     raft_free(p);

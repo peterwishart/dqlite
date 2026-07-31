@@ -431,8 +431,7 @@ TEST(node, stopInflightWrites, setUpInflight, tearDownInflight, 0, node_params)
 	rv = clientRecvResult(&clients[0], NULL, NULL, NULL);
 	munit_assert_int(rv, ==, RAFT_OK);
 
-	/* No INSERT has run yet, so no write can have started (the POSIX
-	 * version peeked at the semaphore value with sem_getvalue() here). */
+	/* No INSERT has run yet, so no write can have started. */
 	started = atomic_load(&write_count);
 	munit_assert_int(started, ==, 0);
 
@@ -448,11 +447,8 @@ TEST(node, stopInflightWrites, setUpInflight, tearDownInflight, 0, node_params)
 	rv = dqlite_node_stop(f->node);
 	munit_assert_int(rv, ==, 0);
 
-	/* Check that some of the queries were still in flight. write_count
-	 * includes the write whose token uv_sem_wait() consumed above, so
-	 * "count < CLIENT_N" is the same condition the POSIX version expressed
-	 * as sem_getvalue() < CLIENT_N-1 (the semaphore value excluded the
-	 * consumed token). */
+	/* Check that some of the queries were still in flight (write_count
+	 * includes the write consumed by uv_sem_wait() above). */
 	started = atomic_load(&write_count);
 	munit_assert_int(started, <, CLIENT_N);
 

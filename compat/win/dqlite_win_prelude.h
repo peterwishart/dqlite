@@ -327,21 +327,14 @@ static inline int accept4(int fd,
 }
 
 /* ---- aligned_alloc (C11) -> malloc --------------------------------------
- * UCRT has no C11 aligned_alloc(). The obvious candidate, _aligned_malloc(),
- * returns memory that MUST be freed with _aligned_free() and NOT plain free() --
- * but C11 guarantees aligned_alloc() memory is freeable with free(), and the
- * raft/dqlite code (and its tests) rely on that (e.g. raft_aligned_alloc()
- * followed by raft_free()). Honouring _aligned_malloc's free() restriction
- * across every call site is infeasible and heap-corrupting when missed.
- *
- * dqlite only requests alignment for O_DIRECT I/O, which is disabled on Windows
- * (buffered writes via the portable backend), so the alignment is not needed
- * for correctness here. We therefore map aligned_alloc() to plain malloc():
- * the free()/aligned-free contract holds and no heap bookkeeping mismatch is
- * possible. Alignment argument is intentionally ignored. This relaxed,
- * platform-dependent contract is documented at raft_aligned_alloc() in
- * src/raft.h, and test/raft/integration/test_heap.c pins it (on Windows it
- * asserts malloc's fundamental alignment instead of the requested one).
+ * UCRT has no C11 aligned_alloc(), and _aligned_malloc() memory MUST be freed
+ * with _aligned_free(), not the plain free() that C11 guarantees and that the
+ * raft/dqlite call sites use (heap-corrupting when missed). So map
+ * aligned_alloc() to plain malloc(), intentionally ignoring `alignment`: the
+ * free() contract holds and no heap bookkeeping mismatch is possible. Why the
+ * lost over-alignment is sound (only O_DIRECT needs it, never used on Windows)
+ * is documented at raft_aligned_alloc() in src/raft.h -- the canonical home of
+ * this platform-dependent contract, pinned by test/raft/integration/test_heap.c.
  *
  * Provided as a static inline function, NOT a function-like macro, so the raft
  * heap vtable member call `currentHeap->aligned_alloc(...)` is not mis-parsed. */

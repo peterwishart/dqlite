@@ -1474,8 +1474,13 @@ behaviour change).
       problem…"); `src/raft.h:1408` (self-referential "retained as
       documentation of intent"). Keep only the present-tense constraint each
       one protects, in 1-3 lines.
-- [ ] **C5 — Deduplicate repeated rationale paragraphs** — one canonical home,
-      one-line cross-refs elsewhere:
+- [x] **C5 — Deduplicate repeated rationale paragraphs. DONE 2026-07-31.**
+      Canonical homes: warn-once → `uvWriterThreadpoolForced()`;
+      aligned_alloc → `src/raft.h`; backend-selection → unit test twin;
+      tie-break → `compareNodeIds()`; atomic_int → its declaration. Net −37
+      lines. Discriminator set deliberately left for C8. Windows unit
+      328/328, raft-uv-unit 20/20, raft-uv-int 212/212; Linux unit 324/324,
+      raft-uv-unit 25/25, raft-uv-int 237/237, node 54/54. Sets:
       - warn-once-on-stderr paragraph ×3: `src/raft/uv_fs.c:1237-1243`,
         `src/raft/uv_writer.c:69-75`, `src/vfs.c:1912-1918`;
       - `raft_aligned_alloc` platform caveat ×4: `src/raft.h:1386-1399`

@@ -349,13 +349,9 @@ TEST_CASE(adjust, standby_weights_vs_failure_domains, NULL)
 	return MUNIT_OK;
 }
 
-/* Fully-equivalent promotion candidates (same failure-domain count, weight,
- * role and online state) are chosen in ascending node-id order. This pins the
- * final id tie-break in compareNodesForPromotion: without it the outcome for
- * equal candidates depends on how the platform's sort handles equal elements
- * (glibc's qsort_r is a stable merge sort and preserves the ascending-id input
- * order; MSVC's qsort_s is not stable), so this test must pass unchanged on
- * every platform. */
+/* Fully-equivalent promotion candidates are chosen in ascending node-id order
+ * on every platform. This pins the id tie-break in compareNodesForPromotion;
+ * see compareNodeIds() in src/roles.c for why it exists. */
 TEST_CASE(adjust, promote_voter_tie_break, NULL)
 {
 	(void)params;
@@ -372,13 +368,9 @@ TEST_CASE(adjust, promote_voter_tie_break, NULL)
 	return MUNIT_OK;
 }
 
-/* Fully-equivalent demotion candidates (same failure-domain count, weight,
- * role and online state) are demoted in ascending node-id order. This pins the
- * id tie-break in compareNodesForDemotion: only the substantive keys are
- * negated relative to promotion, so equal candidates are still ordered
- * lowest-id-first, matching the order upstream's stable glibc sort produces
- * for ascending-id configurations. Node 4 is the local node, which is never
- * demoted, so the candidates are nodes 1-3. */
+/* Fully-equivalent demotion candidates are demoted in ascending node-id order:
+ * the tie-break is not negated (see compareNodeIds() in src/roles.c). Node 4 is
+ * the local node, which is never demoted, so the candidates are nodes 1-3. */
 TEST_CASE(adjust, demote_voter_tie_break, NULL)
 {
 	(void)params;

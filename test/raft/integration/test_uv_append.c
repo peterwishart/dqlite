@@ -9,11 +9,8 @@
 
 #if defined(DQLITE_HAVE_KAIO)
 /* True when the portable libuv-threadpool write backend is in effect, in which
- * case kernel-AIO-specific test cases do not apply. On a kernel-AIO build the
- * portable backend is selected only when explicitly forced via
- * DQLITE_IO_BACKEND=threadpool; when async kernel I/O is merely unavailable
- * (e.g. DQLITE_IO_NO_DIRECT is set) the AIO backend is still used, running
- * io_submit blocking in the threadpool, so KAIO failure modes still apply. */
+ * case kernel-AIO-specific test cases do not apply. Full backend-selection
+ * rationale at the twin helper in test/raft/unit/test_uv_writer.c. */
 static bool uvThreadpoolBackend(void)
 {
 	const char *backend = getenv("DQLITE_IO_BACKEND");

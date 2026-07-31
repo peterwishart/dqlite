@@ -28,11 +28,9 @@ static void *defaultRealloc(void *data, void *ptr, size_t size)
 	return realloc(ptr, size);
 }
 
-/* On Windows aligned_alloc() here is the compat shim (a plain malloc() that
- * ignores `alignment` -- see compat/win/dqlite_win_prelude.h), so the returned
- * block has only malloc's fundamental alignment there. The full contract is
- * documented at raft_aligned_alloc() in src/raft.h; alignment only matters for
- * O_DIRECT buffers, and direct I/O is never used on Windows. */
+/* On Windows aligned_alloc() is the compat shim that ignores `alignment` (see
+ * compat/win/dqlite_win_prelude.h); contract at raft_aligned_alloc() in
+ * src/raft.h. */
 static void *defaultAlignedAlloc(void *data, size_t alignment, size_t size)
 {
 	(void)data;

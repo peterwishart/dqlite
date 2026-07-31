@@ -1915,13 +1915,8 @@ static bool vfsNoMremap(void)
 		const char *env = getenv("DQLITE_VFS_NO_MREMAP");
 		v = (env != NULL && env[0] != '\0');
 		if (v) {
-			/* This switch silently changes the shm remapping
-			 * mechanism of a production binary, so honouring it
-			 * must never be silent: warn once, unconditionally on
-			 * stderr. The tracing path (LIBDQLITE_TRACE) is opt-in
-			 * and disabled in normal operation, so it cannot be
-			 * relied on to reach an operator. A benign race on the
-			 * cache can at worst print the warning twice. */
+			/* Warn once, unconditionally on stderr; rationale at
+			 * uvWriterThreadpoolForced() in src/raft/uv_writer.c. */
 			fprintf(stderr,
 				"dqlite: WARNING: DQLITE_VFS_NO_MREMAP is set: "
 				"shm mappings are replaced with the portable "
