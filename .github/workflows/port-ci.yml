@@ -257,7 +257,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: vcpkg-bincache
           key: vcpkg-bincache-x64-windows-${{ hashFiles('vcpkg.json') }}
