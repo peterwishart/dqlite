@@ -140,8 +140,14 @@ static inline int DqliteWinPipeWriteAll(HANDLE h, const void *buf, size_t len)
 	return (int)total;
 }
 
+/* Distinct-from-error sentinel returned by DqliteWinPipeReadTimed when the
+ * timeout expires: 0 is reserved for remote EOF (mirroring read(2)), so a
+ * caller can tell a closed peer from a slow one. */
+#define DQLITE_WIN_PIPE_TIMEOUT (-2)
+
 /* Read up to `len` bytes with a millisecond timeout (`timeout_ms < 0` == wait
- * forever). Returns bytes read (>0), 0 on EOF or timeout, -1 on error. */
+ * forever). Returns bytes read (>0), 0 on EOF, DQLITE_WIN_PIPE_TIMEOUT on
+ * timeout, -1 on error. */
 static inline int DqliteWinPipeReadTimed(HANDLE h,
 					 void *buf,
 					 size_t len,
@@ -166,10 +172,14 @@ static inline int DqliteWinPipeReadTimed(HANDLE h,
 		if (WaitForSingleObject(ov.hEvent, wms) == WAIT_TIMEOUT) {
 			CancelIoEx(h, &ov);
 			/* Wait for the cancellation to settle before the
-			 * OVERLAPPED/buffer go out of scope. */
-			GetOverlappedResult(h, &ov, &done, TRUE);
+			 * OVERLAPPED/buffer go out of scope. The read may have
+			 * completed in the WAIT_TIMEOUT..CancelIoEx window;
+			 * such bytes are already consumed from the pipe, so
+			 * return them rather than dropping them. */
+			ok = GetOverlappedResult(h, &ov, &done, TRUE);
 			CloseHandle(ov.hEvent);
-			return 0; /* timeout */
+			return (ok && done > 0) ? (int)done
+						: DQLITE_WIN_PIPE_TIMEOUT;
 		}
 		ok = GetOverlappedResult(h, &ov, &done, FALSE);
 	} else if (ok) {

@@ -1404,12 +1404,17 @@ behaviour change).
       other flagged macro shims (`poll`, `bcmp`, `strtok_r`) are
       single-evaluation pass-throughs — left as macros deliberately.
       Windows unit-test 328/328, integration server 8/8.
-- [ ] **R7 — Decide `DqliteWinPipeReadTimed` EOF-vs-timeout (review B-3c).**
-      Returns 0 for both (`compat/win/dqlite_win_pipe.h:159`, `:169`);
-      `src/client/protocol.c:179-183` cannot distinguish. Either give timeout
-      a distinct negative return and handle it at the call site, or document
-      at the call site why conflation is safe for every current caller.
-      Cheap now, confusing during test-failure triage later — lean fix.
+- [x] **R7 — `DqliteWinPipeReadTimed` EOF-vs-timeout (review B-3c).
+      DONE 2026-07-31.** Timeout now returns a distinct sentinel
+      (`DQLITE_WIN_PIPE_TIMEOUT` = -2); 0 is EOF only, mirroring the POSIX
+      `doRead` (whose poll-timeout and read-EOF branches were already
+      distinct code paths with the same short-read outcome). Caller updated
+      to three branches. Bonus fix: bytes completing in the
+      WAIT_TIMEOUT→CancelIoEx race window were silently dropped (stream
+      corruption); they are now returned. `DqliteWinPipeWriteAll` audited:
+      no analogous ambiguity (no timeout; short write already treated as
+      failure by all callers). Windows unit 328/328, client 6/6, server 8/8,
+      cluster 23/23 over pipes.
 
 ### 12.2 Comment hygiene (delta vs upstream must be concise, correct, current)
 

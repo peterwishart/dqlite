@@ -176,10 +176,15 @@ static ssize_t doRead(int fd,
 			n = DqliteWinPipeReadTimed(h, (char *)buf + (size_t)total,
 						   buf_len - (size_t)total,
 						   millis);
-			if (n < 0) {
+			if (n == DQLITE_WIN_PIPE_TIMEOUT) {
+				/* Timeout: short read, like poll() rv == 0
+				 * below. */
+				break;
+			} else if (n < 0) {
 				return -1;
 			} else if (n == 0) {
-				break; /* EOF or timeout */
+				/* EOF */
+				break;
 			}
 			total += n;
 		}
