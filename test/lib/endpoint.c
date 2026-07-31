@@ -68,9 +68,12 @@ static int getFamily(const MunitParameter params[])
 	}
 	if (family == NULL) {
 #ifdef _WIN32
-		/* The abstract-namespace AF_UNIX family used by the POSIX default
-		 * cannot bind on Windows, so tests that don't request a family
-		 * explicitly run over TCP loopback here. */
+		/* On Windows the "unix" family is carried over a named pipe
+		 * (see test_endpoint_listen below), which has no listener
+		 * socket fd, so the fd-based test_endpoint_accept()/_pair()
+		 * used by suites that take the default cannot serve it. Default
+		 * to TCP loopback; "unix" stays available as an explicit opt-in
+		 * for loop-based suites (test/unit/ext/test_uv.c). */
 		family = "tcp";
 #else
 		family = "unix";

@@ -1418,7 +1418,11 @@ behaviour change).
 
 ### 12.2 Comment hygiene (delta vs upstream must be concise, correct, current)
 
-- [ ] **C1 — Fix the factually wrong comments** (all verified wrong):
+- [x] **C1 — Fix the factually wrong comments. DONE 2026-07-31.** All five
+      fixed; `test/lib/server.h` restored to the upstream `address[8]`
+      declaration (the `[24]` widening was dead headroom for a TCP address
+      never used). Windows unit 328/328 + server 8/8; Linux automake
+      unit-test 324/324 + integration-test links. Original list:
       - `test/lib/server.h:22-25`: claims Windows uses TCP loopback; the code
         binds `"@%u"` over a named pipe unconditionally
         (`test/lib/server.c:117-120`). Also shrink the now-pointless

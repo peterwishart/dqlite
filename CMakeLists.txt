@@ -20,10 +20,8 @@
 #     DQLITE_HAVE_KAIO stays undefined off-Linux, so raft I/O uses the portable
 #     libuv threadpool write path.
 #
-#   macOS — NOT wired: the elseif(APPLE) branch is still a deliberate
-#     FATAL_ERROR stub. The __APPLE__-guarded source-level work exists but is
-#     unverified (no Mac available); wiring this branch is the next step, and a
-#     real compile is expected to surface further gaps.
+#   macOS — the elseif(APPLE) branch is a deliberate FATAL_ERROR stub; the
+#     UNVERIFIED-NEEDS-MAC markers in the sources are the outstanding work-list.
 #
 # Structured this way so the file is upstreamable: a single build description
 # that grows a real backend per platform rather than a fork.
@@ -89,7 +87,7 @@ include(CheckSymbolExists)
 
 # --------------------------- Dependencies ----------------------------------
 # libuv / SQLite / lz4 are all cross-platform. On Linux/macOS resolve them via
-# pkg-config; on Windows the idiomatic path is vcpkg (find_package), stubbed
+# pkg-config; on Windows the idiomatic path is vcpkg (find_package), wired up
 # below.
 find_package(Threads REQUIRED)
 
@@ -162,11 +160,11 @@ elseif(APPLE)
     "src/raft/syscall.c, uv_os.c, uv_fs.c, uv_writer.c")
 
 elseif(WIN32)
-  # Build-system plumbing only. DQLITE_HAVE_KAIO stays undefined off-Linux, so
-  # raft I/O uses the portable libuv threadpool write path. Source-level Win32
-  # porting (IOCP fast path, CreateFileMapping WAL shmem, AF_UNIX/TCP transport,
-  # __declspec export/import for include/dqlite.h) is still pending -- configure
-  # succeeds and deps resolve, but a full build will not yet compile/link.
+  # This branch defines the Windows platform macros (CRT/Winsock deprecation
+  # silencing, WIN32_LEAN_AND_MEAN, NOMINMAX); the compat/win include dir, the
+  # forced prelude (/FI) and the dqlite_win_compat link are applied per-target
+  # in dqlite_common_flags() below. DQLITE_HAVE_KAIO stays undefined off-Linux,
+  # so raft I/O uses the portable libuv threadpool write path.
   list(APPEND DQLITE_PLATFORM_DEFS _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX)
   # POSIX-compat shim layer (compat/win): silence the UCRT deprecation of the
   # POSIX I/O aliases (read/write/close/...) and the legacy Winsock names.
