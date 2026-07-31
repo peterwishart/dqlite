@@ -224,6 +224,10 @@ static inline struct tm *gmtime_r(const time_t *timep, struct tm *result)
  * returns early and there is never a remainder to report (POSIX writes *rem
  * only on EINTR). */
 int dqliteWinNanosleep(long long sec, long long nsec);
-#define nanosleep(req, rem) dqliteWinNanosleep((req)->tv_sec, (req)->tv_nsec)
+static inline int nanosleep(const struct timespec *req, struct timespec *rem)
+{
+	(void)rem; /* never written; see comment above */
+	return dqliteWinNanosleep(req->tv_sec, req->tv_nsec);
+}
 
 #endif /* DQLITE_COMPAT_UNISTD_H */

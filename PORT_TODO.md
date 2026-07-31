@@ -1396,10 +1396,14 @@ behaviour change).
       distinct-long-names collision case) — first coverage of the mapping.
       Windows unit-test 328/328, integration cluster 23/23 + membership 5/5
       over pipes; Linux automake 324/324 (untouched).
-- [ ] **R6 — `nanosleep` macro hygiene.** The shim at `compat/win/unistd.h:227`
-      double-evaluates `req` and silently discards `rem`. Convert to an inline
-      function (the implementation `dqliteWinNanosleep` already exists in
-      `compat/win/compat_win.c`).
+- [x] **R6 — `nanosleep` macro hygiene. DONE 2026-07-31.** Now a
+      `static inline` with typed args (single evaluation; `rem` explicitly
+      unused — the Windows sleep never returns early, so POSIX's
+      EINTR-remainder case cannot arise). All 7 call sites audited
+      (`nanosleep(&ts, NULL)` shape, nothing relied on macro quirks). The
+      other flagged macro shims (`poll`, `bcmp`, `strtok_r`) are
+      single-evaluation pass-throughs — left as macros deliberately.
+      Windows unit-test 328/328, integration server 8/8.
 - [ ] **R7 — Decide `DqliteWinPipeReadTimed` EOF-vs-timeout (review B-3c).**
       Returns 0 for both (`compat/win/dqlite_win_pipe.h:159`, `:169`);
       `src/client/protocol.c:179-183` cannot distinguish. Either give timeout

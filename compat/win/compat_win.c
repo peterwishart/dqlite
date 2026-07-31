@@ -14,7 +14,7 @@
  *  - fcntl():   implements NO command -- always fails with ENOSYS. See the
  *               function comment; no Windows-compiled code calls it.
  *  - dqliteWinNanosleep(): sub-millisecond sleep on a high-resolution
- *               waitable timer, backing the nanosleep() macro in unistd.h
+ *               waitable timer, backing the nanosleep() wrapper in unistd.h
  *               (vfs.c's WAL-contention backoff needs microsecond sleeps).
  *  - pread()/pwrite(): positional I/O via ReadFile/WriteFile with an
  *               OVERLAPPED offset; does not disturb the fd's file position.
@@ -138,7 +138,7 @@ int fcntl(int fd, int cmd, ...)
 
 /* -------------------------------------------------------------- nanosleep */
 
-/* dqliteWinNanosleep(): the real function behind the nanosleep() macro in
+/* dqliteWinNanosleep(): the real function behind the nanosleep() wrapper in
  * compat/win/unistd.h.
  *
  * The production caller is vfsSleep (src/vfs.c, SQLite's xSleep), which
