@@ -18,7 +18,7 @@
 struct test_server
 {
 	unsigned id;         /* Server ID. */
-	char address[8];     /* Server address. */
+	char address[64];    /* Server address. */
 	char *dir;           /* Data directory. */
 	dqlite_node *dqlite; /* Dqlite instance. */
 	bool role_management;

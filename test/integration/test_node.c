@@ -34,6 +34,20 @@ struct fixture
 	dqlite_node *node; /* Node instance. */
 };
 
+/* Abstract-socket names (and the Windows named-pipe names that "@..."
+ * addresses map to) are machine-global, so a fixed name collides with any
+ * concurrent test process: bind() fails with EADDRINUSE and
+ * dqlite_node_set_bind_address() returns 1. Qualify with the pid; the
+ * address is copied by dqlite_node_set_bind_address(), so a shared static
+ * buffer is fine. */
+static const char *localAddress(unsigned n)
+{
+	static char address[64];
+	snprintf(address, sizeof address, "@dqlite-%lu-%u",
+		 (unsigned long)getpid(), n);
+	return address;
+}
+
 static void *setUp(const MunitParameter params[], void *user_data, const char *dir, const char *address)
 {
 	if (dir == NULL) {
@@ -58,7 +72,7 @@ static void *setUp(const MunitParameter params[], void *user_data, const char *d
 
 static void *setUpLocal(const MunitParameter params[], void *user_data)
 {
-	return setUp(params, user_data, test_dir_setup(), "@123");
+	return setUp(params, user_data, test_dir_setup(), localAddress(123));
 }
 
 static void *setUpInet(const MunitParameter params[], void *user_data)
@@ -85,7 +99,7 @@ static void *setUpForRecovery(const MunitParameter params[], void *user_data)
 	rv = dqlite_node_create(1, "1", f->dir, &f->node);
 	munit_assert_int(rv, ==, 0);
 
-	rv = dqlite_node_set_bind_address(f->node, "@123");
+	rv = dqlite_node_set_bind_address(f->node, localAddress(123));
 	munit_assert_int(rv, ==, 0);
 
 	return f;
@@ -661,7 +675,7 @@ TEST(node, locked, setUpLocal, tearDown, 0, NULL)
 	rv = dqlite_node_create(2, "2", f->dir, &node2);
 	munit_assert_int(rv, ==, 0);
 
-	rv = dqlite_node_set_bind_address(node2, "@456");
+	rv = dqlite_node_set_bind_address(node2, localAddress(456));
 	munit_assert_int(rv, ==, 0);
 
 	rv = dqlite_node_start(f->node);

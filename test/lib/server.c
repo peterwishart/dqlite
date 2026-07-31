@@ -115,10 +115,14 @@ void test_server_setup(struct test_server *s,
 	(void)params;
 
 	s->id = id;
-	/* Local abstract-namespace address on Linux; on Windows the same "@ID"
+	/* Local abstract-namespace address on Linux; on Windows the same "@name"
 	 * address is carried over a Win32 named pipe (see endpointConnect and
-	 * dqliteNodeBindPipe in src/server.c). */
-	sprintf(s->address, "@%u", id);
+	 * dqliteNodeBindPipe in src/server.c). Both namespaces are machine-global,
+	 * so a fixed name like "@1" collides with any concurrent test run (or a
+	 * leaked child of an aborted one): bind() fails with EADDRINUSE and
+	 * dqlite_node_set_bind_address() returns 1. Qualify with the pid. */
+	snprintf(s->address, sizeof s->address, "@dqlite-%lu-%u",
+		 (unsigned long)getpid(), id);
 
 	s->dir = test_dir_setup();
 	s->role_management = false;

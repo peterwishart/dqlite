@@ -130,7 +130,7 @@ TEST(cluster, dataOnNewNode, setUp, tearDown, 0, cluster_params)
 	long n_records =
 	    strtol(munit_parameters_get(params, "num_records"), NULL, 0);
 	unsigned id = 2;
-	const char *address = "@2";
+	const char *address = f->servers[1].address;
 	int rv;
 
 	HANDSHAKE;
@@ -290,7 +290,7 @@ TEST(cluster, modifyingQuery, setUp, tearDown, 0, cluster_params)
 	    strtol(munit_parameters_get(params, "num_records"), NULL, 0);
 	char sql[128];
 	unsigned id = 2;
-	const char *address = "@2";
+	const char *address = f->servers[1].address;
 
 	HANDSHAKE;
 	OPEN;
@@ -333,7 +333,7 @@ TEST(cluster, modifyingQuerySql, setUp, tearDown, 0, cluster_params)
 	    strtol(munit_parameters_get(params, "num_records"), NULL, 0);
 	char sql[128];
 	unsigned id = 2;
-	const char *address = "@2";
+	const char *address = f->servers[1].address;
 
 	HANDSHAKE;
 	OPEN;

@@ -1645,11 +1645,18 @@ net additions. One marginal drop, several gaps.
       *ROOT-CAUSED 2026-07-31: platform-independent PRODUCT deadlock in the
       shutdown path (write-parked exec vs deferred close) — full analysis,
       deterministic repro and fix plan in §12.6; fix in progress.*
-- [ ] **P2 — diagnose the WSL `membership`/`client`
-      `dqlite_node_set_bind_address`=1 failures** (§11.4).
-      *ROOT-CAUSED 2026-07-31: abstract-socket name collision with any
-      concurrent/leaked process holding `@1`…`@5` (EADDRINUSE, errno-proven)
-      — analysis and harness fix plan in §12.6; fix in progress.*
+- [x] **P2 — WSL `membership`/`client` bind failures. ROOT-CAUSED AND FIXED
+      2026-07-31.** Cause: harness bound fixed machine-global abstract names
+      (`@1`…`@5`) — any concurrent or leaked process collides
+      (EADDRINUSE, errno-proven; full analysis §12.6). Fix: pid-qualified
+      `@dqlite-<pid>-<id>` addresses in `test_server_setup` (+`address[64]`),
+      fixture-address references replacing the hard-coded literals in
+      membership/cluster/role_management, and a `localAddress()` helper for
+      the standalone node tests. Proof: two concurrent `membership/` runs
+      now pass 5/5+5/5 on BOTH platforms (deterministic failure before).
+      Sequential counts unchanged everywhere. Residual (separate follow-up):
+      `test_server.c` fixed TCP ports 8880-8882 are the same collision
+      class.
 - [x] **P3 — `AC_SYS_LARGEFILE` parity in CMake. RESOLVED 2026-07-31: already
       at parity, no change.** The Linux CMake branch has always appended
       `_GNU_SOURCE _FILE_OFFSET_BITS=64` to `DQLITE_PLATFORM_DEFS`, applied
