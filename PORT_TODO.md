@@ -220,8 +220,11 @@ persistence backend) plus a few spots in `src/`. The raft *algorithm* core
 - [ ] Decide upstream story: keep autotools for Linux + add CMake, or migrate
       fully. (Recommend: add CMake, keep autotools authoritative on Linux until
       CMake reaches parity.)
-- [ ] Port remaining `configure.ac` feature checks to CMake `check_*`
-      (`AC_SYS_LARGEFILE`, pthread flags, backtrace/libunwind, coverage)
+- [x] Port remaining `configure.ac` feature checks to CMake `check_*`
+      (`AC_SYS_LARGEFILE`, pthread flags, backtrace/libunwind, coverage) —
+      all four resolved: backtrace + coverage below (2026-07-28);
+      `AC_SYS_LARGEFILE` verified already-at-parity and pthread flags moot
+      post-S1 (2026-07-31, see §12.4 P3).
 - [x] `--enable-backtrace` equivalent — `DQLITE_ENABLE_BACKTRACE` CMake option
       (2026-07-28), default ON on non-Windows / OFF on Windows. Replicates
       `configure.ac` precedence: `check_include_file(backtrace.h)`→`-lbacktrace`,
@@ -1645,10 +1648,18 @@ net additions. One marginal drop, several gaps.
       `dqlite_node_set_bind_address`=1 failures** (§11.4) so WSL is a
       trustworthy Linux verification environment again; currently those two
       suites are a blind spot in every WSL run (and in the T2/T3 runs above).
-- [ ] **P3 — DO (cheap): `AC_SYS_LARGEFILE` parity in CMake** (§1 leftover).
-      Add `_FILE_OFFSET_BITS=64` for the Linux CMake build so CMake-built
-      binaries match autotools on 32-bit hosts. The pthread-flags half of
-      that item is moot post-S1 (no pthread use left) — tick it as such.
+- [x] **P3 — `AC_SYS_LARGEFILE` parity in CMake. RESOLVED 2026-07-31: already
+      at parity, no change.** The Linux CMake branch has always appended
+      `_GNU_SOURCE _FILE_OFFSET_BITS=64` to `DQLITE_PLATFORM_DEFS`, applied
+      to every compiling target via `dqlite_common_flags()` (verified: no
+      target bypasses it); unconditional == AC_SYS_LARGEFILE on Linux
+      (no-op on 64-bit, exact define on 32-bit; `_LARGE_FILES` is
+      AIX/HP-UX-only). Probe ordering matches upstream too (header probes
+      run before the define in both systems). Pthread half confirmed moot:
+      zero `pthread_*`/`<pthread.h>` uses remain (4 comment mentions only);
+      `find_package(Threads)`/`Threads::Threads` deliberately retained —
+      libuv needs `-pthread` transitively on Linux and upstream configure.ac
+      still runs `AX_PTHREAD`.
 - [ ] **P4 — VERIFY, defer the rest: `test/lib/fs.c`/`test/raft/lib/dir.c`
       helpers** (§9 leftover). Full loopback-filesystem porting is not
       feasible on Windows; just confirm the plain-dir/tmpdir parameter sets
