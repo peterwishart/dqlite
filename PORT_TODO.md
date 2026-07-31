@@ -1602,9 +1602,30 @@ net additions. One marginal drop, several gaps.
       env-prefixed passes (`DQLITE_IO_BACKEND=threadpool …`,
       `DQLITE_VFS_NO_MREMAP=1 …`, `DQLITE_IO_NO_DIRECT=1 …`) to CI and/or a
       checked-in verification script that the runbooks call.
-- [ ] **T4 — Minimal CI (review B-2, absorbs the §9 GH-Actions item).**
-      *INVESTIGATED 2026-07-31 — full design + draft workflow in §12.6;
-      execution pending (after P1/P2 fixes).* The
+- [x] **T4 — Minimal CI. DONE 2026-07-31 (awaiting first push to validate
+      end-to-end).** `.github/workflows/port-ci.yml` added (design §12.6;
+      existing upstream workflows byte-untouched and still cover the
+      autotools leg): upstream-parity guard, linux-cmake (clang `-Werror`,
+      full suites + full integration binary with SKIP_STRESS=1 +
+      portable-check.sh), linux-cmake-nokaio (builds AND runs the
+      `#else` arms — closes coverage gap 6), windows-cmake (clang-cl `/WX`,
+      vcpkg file-cache, full integration binary — which now doubles as the
+      continuous P1-regression detector). Stress legs dispatch-only
+      (`run_stress`). All four pre-push checks passed on this machine:
+      Linux-clang -Werror quadrant zero warnings; nokaio dry run green;
+      Windows /WX 411/411 targets clean; codespell zero hits. Pre-push
+      verification also caught and fixed TWO latent test bugs: (1)
+      `CMAKE_C_VISIBILITY_PRESET hidden` compiled the ADDRINFO
+      getaddrinfo-interposition as `.hidden`, silently disabling the DNS
+      injection tests in EVERY CMake Linux build (per-file
+      `-fvisibility=default` restores automake parity); (2)
+      `init/probeAsyncIoOom` needed a compile-time skip under
+      `DQLITE_DISABLE_KAIO`. YAML validated with python + actionlint
+      (0 findings). Push-time steps: enable Actions on the fork, push,
+      `gh run list`; first Windows run spends ~10-20 min building vcpkg
+      deps before the cache primes; then dispatch once with
+      `run_stress=true`. A true nightly needs the workflow on the default
+      branch — deferred. The
       branch has zero CI; every verification number is a manual run, and the
       "0 warnings" property is enforced by nobody. Smallest useful matrix:
       (a) Linux autotools `make check` (proves T2 stays true),

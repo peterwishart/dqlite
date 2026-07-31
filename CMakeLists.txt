@@ -377,6 +377,22 @@ if(WIN32 AND CMAKE_C_COMPILER_ID MATCHES "Clang")
     COMPILE_OPTIONS "/clang:-Wno-sign-compare")
 endif()
 
+# test/raft/lib/addrinfo.c interposes getaddrinfo/freeaddrinfo (ELF symbol
+# interposition + dlsym(RTLD_NEXT)) so the ADDRINFO_TEST injection tests can
+# fake DNS results. CMAKE_C_VISIBILITY_PRESET=hidden (above) compiles those
+# interposing definitions as .hidden, so they never reach the executable's
+# dynamic symbol table and a SHARED libuv keeps binding libc's getaddrinfo:
+# the injection silently never fires and tcp_connect/{firstIP,secondIP,
+# closeDuringSecondConnect} fail against real DNS. Compile just this file
+# with default visibility to restore parity with the automake build (which
+# sets no visibility preset). Non-Windows only: on Windows these tests are
+# skipped (see test/raft/lib/addrinfo.h) and the names would clash with
+# ws2_32's exports.
+if(NOT WIN32)
+  set_source_files_properties(test/raft/lib/addrinfo.c PROPERTIES
+    COMPILE_OPTIONS "-fvisibility=default")
+endif()
+
 # Windows-only static library backing the POSIX-compat shim headers. Defined
 # before the first dqlite_link_deps() call so it is visible when targets link
 # it. It only needs the compat include dir + forced prelude (dqlite_common_flags

@@ -1,6 +1,7 @@
 #include "../../../src/raft.h"
 #include "../../../src/raft/byte.h"
 #include "../../../src/raft/uv_encoding.h"
+#include "../../../src/raft/uv_os.h" /* DQLITE_HAVE_KAIO */
 #include "../../lib/runner.h"
 #include "../lib/uv.h"
 
@@ -187,6 +188,12 @@ TEST(init, probeAsyncIoOom, setUp, tearDown, 0, NULL)
         getenv("DQLITE_IO_NO_DIRECT")[0] != '\0') {
         return MUNIT_SKIP;
     }
+#if !defined(DQLITE_HAVE_KAIO)
+    /* In a DQLITE_DISABLE_KAIO build the whole async I/O probe is compiled
+     * out (see UvFsProbeCapabilities in src/raft/uv_fs.c), so the allocation
+     * this test faults never happens and init succeeds. */
+    return MUNIT_SKIP;
+#endif
     HeapFaultConfig(&f->heap, 2 /* delay */, 1 /* repeat */);
     HEAP_FAULT_ENABLE;
     INIT_ERROR(f->dir, RAFT_NOMEM, "probe Async I/O: out of memory");

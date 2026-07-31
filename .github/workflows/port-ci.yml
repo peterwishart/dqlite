@@ -1,0 +1,278 @@
+# port-ci: CI for the Windows/CMake port branch (pw_windows_tests).
+#
+# What this workflow covers (and upstream's workflows do NOT):
+#   * The CMake build system (the port's build) on Linux AND Windows --
+#     upstream CI (build-and-test.yml, latest-deps.yml, static.yml,
+#     nolz4.yaml, test-tracing.yml, packages.yml, coverity.yml) only ever
+#     exercises the autotools build on Linux.
+#   * Warnings-as-errors on the CMake builds (gcc/clang -Werror quadrants on
+#     Linux, clang-cl /WX on Windows): the branch's "0 warnings" claim is
+#     enforced by nobody otherwise.
+#   * The portable I/O paths: a DQLITE_DISABLE_KAIO=ON build+run leg
+#     (compiles and executes the non-kernel-AIO #else arms on Linux) and the
+#     test/portable-check.sh env-switch passes (threadpool writer, no-mremap
+#     VFS, forced-buffered I/O) that a default `make check` leaves dead.
+#   * The native Windows test suites (clang-cl + vcpkg), including the FULL
+#     integration-test binary: the node suite doubles as the regression
+#     detector for the P1 shutdown-deadlock fix -- if it regresses, the run
+#     hangs and the step-level timeout fails the job.
+#   * A mechanical guard that the upstream build files (Makefile.am,
+#     configure.ac, ac/, .github/) stay byte-identical to the merge-base:
+#     the branch's ground rule is "additions only" there.
+#
+# What upstream workflows still cover on this branch (unchanged, they run on
+# every push): autotools `make check` (8-job ubuntu matrix + sanitizers +
+# coverage), cross-builds, latest-deps, static, nolz4, tracing, linting
+# (clang-format no-op + codespell), packaging.
+#
+# Triggers: push/PR to pw_windows_tests, plus workflow_dispatch with a
+# `run_stress` input that adds the stress legs (integration-test without
+# SKIP_STRESS; ~90s per stress test, dispatch-only to keep push CI bounded).
+# A nightly cron is deferred: scheduled workflows only fire from the default
+# branch, and this branch is not it.
+
+name: Port CI (CMake, Linux + Windows)
+
+on:
+  push:
+    branches:
+      - pw_windows_tests
+  pull_request:
+    branches:
+      - pw_windows_tests
+  workflow_dispatch:
+    inputs:
+      run_stress:
+        description: "Also run the stress suites (integration-test without SKIP_STRESS)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: port-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Guard: the autotools build system and upstream CI definitions must stay
+  # byte-identical to the merge-base with upstream -- the port only ADDS
+  # files there (this workflow, CMakeLists.txt, compat/, ...). Any
+  # modification or deletion under the guarded paths fails the job;
+  # pure additions pass.
+  # -------------------------------------------------------------------------
+  upstream-parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Check guarded upstream files are unmodified
+        run: |
+          # Prefer the live merge-base with origin/main; fall back to the
+          # recorded canonical merge-base if the fork has no main branch.
+          # (Update the fallback SHA if the branch is ever rebased.)
+          git fetch --no-tags origin main || true
+          MB=$(git merge-base origin/main HEAD 2>/dev/null \
+               || echo ffae341d9f15cfc34d07f16a6850049dd6917288)
+          echo "merge-base: $MB"
+          # --diff-filter=a: report everything EXCEPT pure additions.
+          VIOLATIONS=$(git diff --name-status --diff-filter=a "$MB" HEAD -- \
+                         Makefile.am configure.ac ac/ .github/)
+          if [ -n "$VIOLATIONS" ]; then
+            echo "::error::Guarded upstream files modified or deleted:"
+            echo "$VIOLATIONS"
+            exit 1
+          fi
+          echo "OK: only additions under the guarded paths."
+
+  # -------------------------------------------------------------------------
+  # Linux CMake reference build: clang, warnings-as-errors, all targets,
+  # full test run (stress opt-out), plus the portable-path env passes.
+  # -------------------------------------------------------------------------
+  linux-cmake:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang ninja-build pkg-config \
+                                  libsqlite3-dev liblz4-dev libuv1-dev
+
+      - name: Configure (clang, warnings-as-errors)
+        run: |
+          cmake -S . -B build -G Ninja \
+                -DCMAKE_C_COMPILER=clang \
+                -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+
+      - name: Build all targets
+        timeout-minutes: 15
+        run: cmake --build build
+
+      - name: Run unit and raft suites
+        timeout-minutes: 30
+        run: |
+          cd build
+          timeout 300 ./unit-test
+          timeout 120 ./raft-core-unit-test
+          timeout 300 ./raft-core-integration-test
+          timeout 300 ./raft-core-fuzzy-test
+          timeout 120 ./raft-uv-unit-test
+          timeout 600 ./raft-uv-integration-test
+
+      # Full binary, not per-suite: this includes the node suite whose
+      # stopInflightReads* tests hang if the P1 shutdown-deadlock fix ever
+      # regresses -- the step timeout is the detector.
+      - name: Run full integration suite (SKIP_STRESS=1)
+        timeout-minutes: 20
+        env:
+          SKIP_STRESS: "1"
+        run: timeout 1000 ./build/integration-test
+
+      - name: Portable-path passes (portable-check.sh)
+        timeout-minutes: 30
+        run: sh test/portable-check.sh build
+
+      - name: Stress suite (dispatch-only)
+        if: github.event_name == 'workflow_dispatch' && inputs.run_stress
+        timeout-minutes: 45
+        run: timeout 2400 ./build/integration-test
+
+  # -------------------------------------------------------------------------
+  # Linux CMake with DQLITE_DISABLE_KAIO=ON: compiles AND executes the
+  # portable (non-kernel-AIO) #else arms of the raft I/O layer on Linux,
+  # closing the coverage gap where those arms were Windows-only.
+  # -------------------------------------------------------------------------
+  linux-cmake-nokaio:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang ninja-build pkg-config \
+                                  libsqlite3-dev liblz4-dev libuv1-dev
+
+      - name: Configure (clang, no kernel AIO, warnings-as-errors)
+        run: |
+          cmake -S . -B build -G Ninja \
+                -DCMAKE_C_COMPILER=clang \
+                -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+                -DDQLITE_DISABLE_KAIO=ON
+
+      - name: Build all targets
+        timeout-minutes: 15
+        run: cmake --build build
+
+      - name: Run suites on the portable I/O paths
+        timeout-minutes: 25
+        run: |
+          cd build
+          timeout 300 ./unit-test
+          timeout 120 ./raft-uv-unit-test
+          timeout 600 ./raft-uv-integration-test
+
+  # -------------------------------------------------------------------------
+  # Windows CMake build: clang-cl (MSVC ABI) + vcpkg manifest deps, /WX via
+  # CMAKE_COMPILE_WARNING_AS_ERROR, full native test run. vcpkg binaries are
+  # cached with a plain file-based binary cache (VCPKG_DEFAULT_BINARY_CACHE +
+  # actions/cache), NOT the x-gha experimental backend. Expect the first run
+  # to spend ~10-20 minutes building libuv/sqlite3/lz4; later runs restore
+  # them from the cache.
+  # -------------------------------------------------------------------------
+  windows-cmake:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
+    steps:
+      - uses: actions/checkout@v7
+
+      # MSVC environment (INCLUDE/LIB/link.exe/Windows SDK) for clang-cl.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Pin the runner image's LLVM clang-cl by absolute path so the compiler
+      # is not whatever `clang-cl` happens to shadow on PATH after
+      # msvc-dev-cmd (VS bundles its own older clang-cl).
+      - name: Show toolchain versions
+        run: |
+          "/c/Program Files/LLVM/bin/clang-cl.exe" --version
+          cmake --version | head -1
+          ninja --version
+
+      # The manifest's builtin-baseline must exist in the runner's vcpkg
+      # clone; the image's C:\vcpkg checkout can lag or be shallow.
+      - name: Ensure vcpkg baseline commit is available
+        run: |
+          baseline=$(jq -r '."builtin-baseline"' vcpkg.json)
+          echo "builtin-baseline: $baseline"
+          if ! git -C "$VCPKG_INSTALLATION_ROOT" cat-file -e "$baseline^{commit}" 2>/dev/null; then
+            echo "baseline not present, fetching..."
+            git -C "$VCPKG_INSTALLATION_ROOT" fetch origin master
+            git -C "$VCPKG_INSTALLATION_ROOT" cat-file -e "$baseline^{commit}"
+          fi
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: vcpkg-bincache
+          key: vcpkg-bincache-x64-windows-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-bincache-x64-windows-
+
+      - name: Configure (clang-cl, vcpkg manifest, warnings-as-errors)
+        run: |
+          mkdir -p vcpkg-bincache
+          cmake -S . -B build -G Ninja \
+                -DCMAKE_C_COMPILER="C:/Program Files/LLVM/bin/clang-cl.exe" \
+                -DCMAKE_TOOLCHAIN_FILE="$(cygpath -m "$VCPKG_INSTALLATION_ROOT")/scripts/buildsystems/vcpkg.cmake" \
+                -DVCPKG_TARGET_TRIPLET=x64-windows \
+                -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+
+      - name: Build all targets
+        timeout-minutes: 30
+        run: cmake --build build
+
+      # The test executables load the vcpkg dependencies as DLLs. The build
+      # is RelWithDebInfo (vcpkg maps it to the RELEASE libraries), so put
+      # ONLY the release bin directory on PATH -- never debug\bin, whose
+      # debug uv.dll links a different CRT and asserts differently.
+      - name: Put vcpkg release DLLs on PATH
+        run: |
+          cygpath -w "$GITHUB_WORKSPACE/build/vcpkg_installed/x64-windows/bin" >> "$GITHUB_PATH"
+
+      - name: Run unit and raft suites
+        timeout-minutes: 30
+        run: |
+          cd build
+          ./unit-test.exe
+          ./raft-core-unit-test.exe
+          ./raft-core-integration-test.exe
+          ./raft-core-fuzzy-test.exe
+          ./raft-uv-unit-test.exe
+          ./raft-uv-integration-test.exe
+
+      # Full unfiltered binary (127 tests incl. the node suite): verified
+      # green 3x on the P1-fixed tip. node/stopInflightReadsParked hangs if
+      # the P1 shutdown-deadlock fix regresses; the step timeout is the
+      # detector -- do not remove it.
+      - name: Run full integration suite (SKIP_STRESS=1)
+        timeout-minutes: 30
+        env:
+          SKIP_STRESS: "1"
+        run: ./build/integration-test.exe
+
+      - name: Stress suite (dispatch-only)
+        if: github.event_name == 'workflow_dispatch' && inputs.run_stress
+        timeout-minutes: 45
+        run: ./build/integration-test.exe
