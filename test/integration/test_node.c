@@ -291,6 +291,72 @@ TEST(node, stopInflightReads, setUpInet, tearDown, 0, node_params)
 	return MUNIT_OK;
 }
 
+/* Like stopInflightReads, but makes sure the in-flight queries are parked on
+ * a pending response write when the node is stopped. Rows streaming is
+ * write-driven: the gateway sends one ROWS_PART batch (~4KB) at a time and
+ * only steps the statement again once the write completes. The clients below
+ * read the first batch and then stop draining; within the sleep the kernel
+ * socket buffers (send + receive, ~tens of KB each) fill up and every
+ * connection ends up with its exec suspended on a write that will never
+ * complete. dqlite_node_stop() must still terminate: interrupt() has to
+ * unpark such execs instead of waiting for them to finish on their own
+ * (which would deadlock: the exec waits on the write, the write on the
+ * transport close, the close on the exec). */
+TEST(node, stopInflightReadsParked, setUpInet, tearDown, 0, node_params)
+{
+	struct fixture *f = data;
+	int rv;
+	rv = dqlite_node_set_busy_timeout(f->node, 10*1000);
+	munit_assert_int(rv, ==, 0);
+	rv = dqlite_node_start(f->node);
+	munit_assert_int(rv, ==, 0);
+
+	/* Open a bunch of clients, start an endless query on each and read
+	 * only the first batch of rows. The 1KB blob per row makes each
+	 * connection fill the kernel socket buffers with just a few dozen
+	 * batches. */
+	struct client_proto clients[CLIENT_N];
+	for (int i = 0; i < CLIENT_N; i++) {
+		struct rows rows;
+		bool done;
+
+		rv = openDb(&clients[i], f->node, "test");
+		munit_assert_int(rv, ==, RAFT_OK);
+		rv = clientSendQuerySQL(&clients[i],
+			"WITH RECURSIVE inf(i) AS( "
+			"    SELECT 1              "
+			"	UNION ALL              "
+			"	SELECT i+1 FROM inf    "
+			")                         "
+			"SELECT i, zeroblob(1024) FROM inf",
+			NULL, 0, NULL
+		);
+		munit_assert_int(rv, ==, RAFT_OK);
+
+		rv = clientRecvRows(&clients[i], &rows, &done, NULL);
+		munit_assert_int(rv, ==, RAFT_OK);
+		munit_assert_false(done);
+		munit_assert_int(rows.column_count, ==, 2);
+		munit_assert_string_equal(rows.column_names[0], "i");
+		clientCloseRows(&rows);
+		/* Stop draining: the server keeps streaming batches until its
+		 * pending write can't complete anymore. */
+	}
+
+	/* Let the server fill the socket buffers so that every exec is
+	 * parked on a write at stop time. */
+	uv_sleep(1000);
+
+	/* Make sure the node can be closed */
+	rv = dqlite_node_stop(f->node);
+	munit_assert_int(rv, ==, 0);
+
+	for (int i = 0; i < CLIENT_N; i++) {
+		clientClose(&clients[i]);
+	}
+	return MUNIT_OK;
+}
+
 #define SNAPSHOT_DIR_PARAM "snapshot_dir"
 
 static char *snapshot_compression[] = {"1", NULL};

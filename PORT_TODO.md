@@ -1641,10 +1641,28 @@ net additions. One marginal drop, several gaps.
 
 ### 12.4 Older PORT_TODO items — triage for this round
 
-- [ ] **P1 — root-cause the Windows `node/stopInflightReads` hang** (§11.4).
-      *ROOT-CAUSED 2026-07-31: platform-independent PRODUCT deadlock in the
-      shutdown path (write-parked exec vs deferred close) — full analysis,
-      deterministic repro and fix plan in §12.6; fix in progress.*
+- [x] **P1 — `node/stopInflightReads` hang. ROOT-CAUSED AND FIXED
+      2026-07-31.** Platform-independent product deadlock in the shutdown
+      path (full analysis §12.6): `interrupt()` now unparks a write-parked
+      query exec (`gateway.awaiting_write` flag; reset+resume mirroring the
+      proven cancellation branch), with three edge-hardening refinements
+      over the plan: flag set before `SUCCESS` (re-entrant synchronous
+      write failure), unpark gated on `close_cb` (client INTERRUPT keeps
+      wait-for-drain semantics per the unit-test contract), and a
+      `gateway__resume` guard against double-resume when the unparked exec
+      suspends in `EXEC_WAITING_APPLY`. New regression test
+      `node/stopInflightReadsParked` (fills kernel buffers before stop;
+      hangs without the fix on BOTH platforms, 40/40 connections proven
+      parked with `wq=4240`). **Full unfiltered `integration-test.exe` now
+      completes on Windows: 3× 127/127** — the node suite is no longer a
+      blind spot. Linux node 56/56, full binary 127/127, unit 324/324;
+      ASan node/ 56/56 zero reports. One existing unit test
+      (`delete/read_statement`) updated to the new close semantics.
+      This is an upstream bug — report/PR it independently of the port
+      (add to §12.5 ledger). Follow-up found during ASan work:
+      `registry__size` (`src/registry.h:35`) is C99 `inline` with no
+      `extern inline` definition, so a `-O0` ASan build fails to link —
+      pre-existing upstream issue, worth an upstream note too.
 - [x] **P2 — WSL `membership`/`client` bind failures. ROOT-CAUSED AND FIXED
       2026-07-31.** Cause: harness bound fixed machine-global abstract names
       (`@1`…`@5`) — any concurrent or leaked process collides

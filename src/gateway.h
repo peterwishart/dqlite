@@ -32,6 +32,15 @@ struct gateway {
 	struct raft *raft;              /* Raft instance */
 	struct leader *leader;          /* Leader connection to the database */
 	struct handle *req;             /* Asynchronous request being handled */
+	/* True while a query exec is parked in EXEC_RUNNING waiting for a
+	 * ROWS_PART response write to drain (see query_work_done): rows
+	 * streaming is write-driven, so nothing is executing on the threadpool
+	 * in that state and leader_exec_abort() would have no effect. The flag
+	 * lets interrupt() discriminate a write-parked exec (which must be
+	 * resumed directly) from one that is executing on the threadpool, and
+	 * lets gateway__resume() avoid resuming an exec that interrupt()
+	 * already unparked. */
+	bool awaiting_write;
 	struct raft_io_async_work work; /* Work request for off-the-loop execution */
 	struct stmt__registry stmts;    /* Registry of prepared statements */
 	uint64_t protocol;              /* Protocol format version */

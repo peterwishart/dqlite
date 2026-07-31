@@ -775,7 +775,17 @@ TEST_CASE(delete, read_statement, NULL)
 	ASSERT_CALLBACK(&conn2, SQLITE_OK, ROWS);
 
 	HANGUP(&conn2);
-	RESUME(&conn2);
+	/* Closing the gateway unparks the query suspended on the response
+	 * write and finalizes it right away (the pending write would be
+	 * cancelled by the transport close): a write completion arriving
+	 * afterwards finds no request to resume. */
+	{
+		bool hangup_finished;
+		buffer__reset(&conn2.response);
+		int hangup_rv = gateway__resume(&conn2.gateway, &hangup_finished);
+		munit_assert_int(hangup_rv, ==, 0);
+		munit_assert_true(hangup_finished);
+	}
 
 	HANGUP(&conn);
 	munit_assert_false(db_exists(&f->servers[0].registry, "test"));

@@ -727,7 +727,14 @@ static void query_work_done(struct raft_io_async_work *work, int rc)
 		/* If the statement is still running, do not resume the
 		 * exec state machine, but send a response instead. The
 		 * execution will resume as soon as the data has been
-		 * sent. See gateway__resume. */
+		 * sent. See gateway__resume.
+		 *
+		 * Mark the exec as parked on the response write *before*
+		 * invoking the request callback: if starting the write fails,
+		 * the callback stops the connection re-entrantly and
+		 * interrupt() must already see the parked state to unpark the
+		 * exec, otherwise nothing would ever resume it. */
+		g->awaiting_write = true;
 		struct response_rows response = {
 			.eof = DQLITE_RESPONSE_ROWS_PART,
 		};
@@ -962,9 +969,33 @@ static int handle_interrupt(struct gateway *g, struct handle *req)
 static void interrupt(struct gateway *g)
 {
 	g->req->cancellation_requested = true;
-	if (g->leader != NULL && g->leader->exec != NULL) {
-		leader_exec_abort(g->leader->exec);
+	if (g->leader == NULL || g->leader->exec == NULL) {
+		return;
 	}
+	if (g->awaiting_write && g->close_cb != NULL) {
+		/* The gateway is closing and the exec is parked in
+		 * EXEC_RUNNING waiting for a ROWS_PART response write to
+		 * drain (see query_work_done). Nothing is executing on the
+		 * threadpool, so leader_exec_abort() would only install a
+		 * progress handler that never fires; and since the client may
+		 * have stopped reading, the write may never complete either:
+		 * gateway__close() defers the transport close until the exec
+		 * is done, while the pending write can only be cancelled by
+		 * that close -- a deadlock. Unpark the exec directly instead,
+		 * mirroring the cancellation branch in query_work_done: reset
+		 * the statement and resume the state machine, which will
+		 * complete and reach the done callback, where the deferred
+		 * close proceeds and cancels the pending write.
+		 *
+		 * When the gateway is not closing (a client INTERRUPT
+		 * request), the write is left alone: the client is draining
+		 * the connection, so the write will complete and
+		 * gateway__resume will deliver the cancellation. */
+		g->awaiting_write = false;
+		sqlite3_reset(g->leader->exec->stmt);
+		return leader_exec_resume(g->leader->exec);
+	}
+	leader_exec_abort(g->leader->exec);
 }
 
 struct change {
@@ -1424,6 +1455,15 @@ int gateway__resume(struct gateway *g, bool *finished)
 	}
 	tracef("gateway resume - not finished");
 	*finished = false;
+
+	if (!g->awaiting_write) {
+		/* The ROWS_PART write that just completed belongs to an exec
+		 * that interrupt() has already unparked: it is completing on
+		 * its own (e.g. waiting for a raft apply) and must not be
+		 * resumed a second time. */
+		return 0;
+	}
+	g->awaiting_write = false;
 
 	g->req->work = (pool_work_t){};
 	handle_query_work_cb(g->leader->exec);
