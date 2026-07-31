@@ -1,4 +1,4 @@
-# port-ci: CI for the Windows/CMake port branch (pw_windows_tests).
+# port-ci: CI for the Windows/CMake port branch (pw_windows_tests). 
 #
 # What this workflow covers (and upstream's workflows do NOT):
 #   * The CMake build system (the port's build) on Linux AND Windows --
@@ -189,7 +189,7 @@ jobs:
   # them from the cache.
   # -------------------------------------------------------------------------
   windows-cmake:
-    runs-on: windows-2022
+    runs-on: windows-2025-vs2026
     timeout-minutes: 120
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-bincache
