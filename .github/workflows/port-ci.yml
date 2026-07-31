@@ -1,4 +1,4 @@
-# port-ci: CI for the Windows/CMake port branch (pw_windows_tests).
+# port-ci: CI for the Windows/CMake port branch (pw_windows_tests). 
 #
 # What this workflow covers (and upstream's workflows do NOT):
 #   * The CMake build system (the port's build) on Linux AND Windows --
