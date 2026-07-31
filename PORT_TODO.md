@@ -1561,13 +1561,20 @@ net additions. One marginal drop, several gaps.
       passes (`RAFT_CANCELED`); threadpool lever still skips; contract
       violation now fails loudly, byte-for-byte upstream. Windows
       raft-uv-unit 20/20 (56 skipped) unchanged.
-- [ ] **T2 — Run the automake build at branch tip on Linux.** The tree's
-      byte-identical-Makefile.am claim has never been *executed* on this
-      branch's code. Specific risk found: `test/raft/unit/test_compress.c:22-27`
-      now calls `uv_random()` directly, and `raft_core_unit_test_LDFLAGS`
-      (`Makefile.am:319`, LZ4 branch) overwrites `AM_LDFLAGS` and with it
-      `$(UV_LIBS)`. Do a full `autoreconf && ./configure && make check` on
-      WSL2 and record the result here.
+- [x] **T2 — Run the automake build at branch tip on Linux. DONE 2026-07-31.**
+      Fresh `autoreconf -fi && ./configure --enable-debug && make -j
+      check-norun` at `83f2d8b` on WSL2 (gcc 13.3, LZ4 detected, `-Werror`
+      active): exit 0, all 7 check programs built. The `uv_random()` link
+      risk in `raft-core-unit-test` is real in the Makefile.am text (`-luv`
+      absent from the explicit link line) but neutralized by libtool:
+      `libtest.la`'s `dependency_libs` carries `-luv`, so the binary links —
+      no change needed, upstream files stay byte-identical. Full run, zero
+      failures: raft-core-unit 262/262, unit 324/324, raft-core-integration
+      191/191, fuzzy 57/57, raft-uv-unit 25/25 (no WSL AIO flakiness),
+      raft-uv-integration 237/237, integration cluster/client/membership/
+      node/fsm/role_management 117/117, server 8/8 (**`stop_twice` PASSED in
+      ~30s — the documented WSL hang did not reproduce**), stress 46/46
+      (EXIT=0, full matrix, ~13-55s per case — data for T6).
 - [ ] **T3 — Exercise the portable paths in a default verification run.**
       The three env switches are read but never set by anything
       (`grep setenv/putenv test/` = empty; no CI): the threadpool writer
