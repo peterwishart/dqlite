@@ -578,6 +578,27 @@ if(DQLITE_BUILD_TESTS)
     test/raft/integration/test_uv_truncate.c
     test/raft/integration/test_uv_truncate_snapshot.c
     test/raft/integration/test_uv_work.c)
+
+  # raft-durability-child: tiny helper process for the crash-durability test
+  # (append/crashDurability in test_uv_append.c). The test spawns it, reads
+  # one acknowledgement byte per completed append from its stdout, then kills
+  # it without warning and verifies every acknowledged entry is still on
+  # disk. Not a test itself (no dqlite_test/add_test): the parent test drives
+  # it, expecting it next to the test executables. CMake-only on purpose - on
+  # POSIX the test forks instead, so the autotools build never needs it (and
+  # Makefile.am must not change); the parent test skips its Windows arm when
+  # the helper is absent.
+  add_executable(raft-durability-child
+    test/tools/durability_child.c
+    src/tracing.c src/lib/sm.c src/lib/threadpool.c)
+  dqlite_common_flags(raft-durability-child)
+  dqlite_link_deps(raft-durability-child)
+  target_link_libraries(raft-durability-child PRIVATE dqlite_raft)
+  if(WIN32)
+    # Same rationale as dqlite_test(): consumes the raft/dqlite API statically,
+    # so blank the __declspec(dllimport) decoration.
+    target_compile_definitions(raft-durability-child PRIVATE DQLITE_STATIC)
+  endif()
 endif()
 
 # Best-effort lcov report target (optional; only if lcov + genhtml are present).

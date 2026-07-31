@@ -1608,13 +1608,23 @@ net additions. One marginal drop, several gaps.
       (d) `-Werror` (or warning-count gate) on the CMake builds.
       Trim the §9 wish-list (`{ubuntu, macos, windows} × clang`) to this;
       macOS joins when the `elseif(APPLE)` stub is wired.
-- [ ] **T5 — Crash-durability test.** No kill-and-recover test exists anywhere
-      in `test/` (upstream or branch) — yet durability is this branch's
-      flagship claim (W1). Add one: append entries, confirm acknowledgement,
-      kill -9 the process/child, reopen the log dir, assert acknowledged
-      entries survive. Protects the KAIO path, the portable backend and the
-      Windows write-through+flush stack alike. (Review PR-plan #13 wants this
-      for upstream too; write it now, on this branch's CMake+automake harness.)
+- [x] **T5 — Crash-durability test. DONE 2026-07-31.**
+      `append/crashDurability` in `test/raft/integration/test_uv_append.c`:
+      child appends 16 index-encoded entries one at a time, acks each append
+      *callback* over a pipe; after 8 acks the parent kills it instantly
+      (SIGKILL / `TerminateProcess`), reloads the dir with a fresh raft_uv
+      instance and asserts every acknowledged entry survives with correct
+      content. POSIX arm forks (runs under automake untouched); Windows arm
+      drives a CMake-only helper (`test/tools/durability_child.c`,
+      `raft-durability-child`), skipping gracefully if absent. Green under
+      Linux KAIO (automake 238/238 whole binary), threadpool, no-direct, and
+      natively on Windows (suite 33/33, binary 213/213). Negative control:
+      sabotaging the portable write path to ack-without-write made the test
+      FAIL on both platforms (`0 >= 8`), then reverted. Honest scope note: a
+      process-kill test proves acknowledged entries fully left user space
+      (the ack-before-write bug class); it cannot detect a missing *device*
+      flush — that needs power-loss testing. `portable-check.sh` runs it via
+      the full raft-uv-integration binary automatically.
 - [ ] **T6 — Decide `stress/read_write_heavy` default-run policy.**
       `test/integration/test_stress.c:266` (count=1500, writers=4, readers=32,
       databases=4) is unguarded and now runs in every Linux `make check`,

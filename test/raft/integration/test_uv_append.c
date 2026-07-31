@@ -7,6 +7,12 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifndef _WIN32
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
+#endif
+
 #if defined(DQLITE_HAVE_KAIO)
 /* True when the portable libuv-threadpool write backend is in effect, in which
  * case kernel-AIO-specific test cases do not apply. Full backend-selection
@@ -663,6 +669,367 @@ TEST(append, ioSetupError, setUp, tearDown, 0, NULL)
     return MUNIT_OK;
 }
 #endif /* DQLITE_HAVE_KAIO */
+
+/*===========================================================================
+  Crash durability: acknowledged entries survive an abrupt process kill
+  ===========================================================================*/
+
+/* Number of entries the child process tries to append, one per request. All
+ * payloads are DURABILITY_ENTRY_SIZE bytes, so everything fits in the first
+ * open segment and the test stays well bounded. */
+#define DURABILITY_TOTAL_ENTRIES 16
+
+/* Number of acknowledged appends the parent waits for before killing the
+ * child. */
+#define DURABILITY_ACKED_ENTRIES 8
+
+/* Byte size of each entry payload; the first 8 bytes encode the 0-based
+ * entry index, so survivors can be verified by content. */
+#define DURABILITY_ENTRY_SIZE 64
+
+/* Give up (and fail) if the child needs longer than this to acknowledge
+ * DURABILITY_ACKED_ENTRIES appends. */
+#define DURABILITY_ACK_TIMEOUT_MS 30000
+
+#ifndef _WIN32
+
+struct durabilityAck
+{
+    bool done;
+    int status;
+};
+
+static void durabilityChildAppendCb(struct raft_io_append *req, int status)
+{
+    struct durabilityAck *ack = req->data;
+    ack->status = status;
+    ack->done = true;
+}
+
+/* Child role of the crash-durability test: create a brand new libuv loop and
+ * raft_uv instance on DIR (nothing is shared with the parent fixture, whose
+ * instance has already been shut down), append DURABILITY_TOTAL_ENTRIES
+ * entries one at a time, and write one byte to ACK_FD every time an append
+ * callback reports success - i.e. every time the write backend claims the
+ * entry is durably on disk. Then wait forever to be SIGKILLed: exiting
+ * normally would close the instance and flush, defeating the test. On any
+ * failure exit with a distinctive nonzero code, which the parent observes as
+ * EOF on the ack pipe.
+ *
+ * This runs in a fork()ed child; everything it touches is created after the
+ * fork (libuv's global threadpool re-initializes itself in fork children via
+ * its pthread_atfork hook). The Windows twin of this logic is the CMake-only
+ * helper executable test/tools/durability_child.c - keep the two in sync. */
+static void durabilityChildRun(const char *dir, int ack_fd)
+{
+    struct uv_loop_s loop;
+    struct raft_uv_transport transport;
+    struct raft_io io;
+    unsigned i;
+    int rv;
+
+    rv = uv_loop_init(&loop);
+    if (rv != 0) {
+        _exit(10);
+    }
+    transport.version = 1;
+    rv = raft_uv_tcp_init(&transport, &loop);
+    if (rv != 0) {
+        _exit(11);
+    }
+    rv = raft_uv_init(&io, &loop, dir, &transport);
+    if (rv != 0) {
+        _exit(12);
+    }
+    raft_uv_set_auto_recovery(&io, false);
+    raft_uv_set_block_size(&io, SEGMENT_BLOCK_SIZE);
+    raft_uv_set_segment_size(&io, SEGMENT_SIZE);
+    rv = io.init(&io, 1, "1");
+    if (rv != 0) {
+        _exit(13);
+    }
+
+    for (i = 0; i < DURABILITY_TOTAL_ENTRIES; i++) {
+        struct raft_io_append req;
+        struct raft_entry entry;
+        uint64_t payload[DURABILITY_ENTRY_SIZE / sizeof(uint64_t)];
+        struct durabilityAck ack = {false, -1};
+
+        memset(payload, 0, sizeof payload);
+        payload[0] = i;
+        entry.term = 1;
+        entry.type = RAFT_COMMAND;
+        entry.buf.base = payload;
+        entry.buf.len = sizeof payload;
+        entry.batch = NULL;
+        req.data = &ack;
+        rv = io.append(&io, &req, &entry, 1, durabilityChildAppendCb);
+        if (rv != 0) {
+            _exit(14);
+        }
+        while (!ack.done) {
+            if (uv_run(&loop, UV_RUN_ONCE) == 0 && !ack.done) {
+                _exit(15);
+            }
+        }
+        if (ack.status != 0) {
+            _exit(16);
+        }
+        if (write(ack_fd, "!", 1) != 1) {
+            _exit(17);
+        }
+    }
+
+    for (;;) {
+        pause();
+    }
+}
+
+/* Read N_ACKS acknowledgement bytes from the child, one blocking read at a
+ * time, giving up if the whole batch takes longer than the timeout. */
+static void durabilityWaitAcks(int fd, unsigned n_acks)
+{
+    unsigned i;
+    for (i = 0; i < n_acks; i++) {
+        struct pollfd pfd;
+        char c;
+        ssize_t got;
+        int rv;
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        rv = poll(&pfd, 1, DURABILITY_ACK_TIMEOUT_MS);
+        if (rv != 1) {
+            munit_errorf("timed out waiting for append ack %u of %u", i + 1,
+                         n_acks);
+        }
+        got = read(fd, &c, 1);
+        if (got != 1) {
+            munit_errorf("child died before append ack %u of %u", i + 1,
+                         n_acks);
+        }
+    }
+}
+
+#else /* _WIN32 */
+
+/* Read N_ACKS acknowledgement bytes from the child's stdout pipe, polling
+ * with PeekNamedPipe so a stuck or dead child fails the test instead of
+ * hanging it. */
+static void durabilityWaitAcks(HANDLE rd, unsigned n_acks)
+{
+    unsigned got_acks = 0;
+    unsigned waited_ms = 0;
+    while (got_acks < n_acks) {
+        DWORD avail = 0;
+        char buf[DURABILITY_TOTAL_ENTRIES];
+        DWORD nread = 0;
+        BOOL ok;
+        ok = PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL);
+        if (!ok) {
+            munit_errorf(
+                "child died before append ack %u of %u (pipe error %lu)",
+                got_acks + 1, n_acks, (unsigned long)GetLastError());
+        }
+        if (avail == 0) {
+            if (waited_ms >= DURABILITY_ACK_TIMEOUT_MS) {
+                munit_errorf("timed out waiting for append ack %u of %u",
+                             got_acks + 1, n_acks);
+            }
+            Sleep(10);
+            waited_ms += 10;
+            continue;
+        }
+        if (avail > sizeof buf) {
+            avail = sizeof buf;
+        }
+        ok = ReadFile(rd, buf, avail, &nread, NULL);
+        munit_assert_true(ok);
+        got_acks += (unsigned)nread;
+    }
+}
+
+#endif /* _WIN32 */
+
+/* Load the on-disk state left behind by the killed child using a fresh
+ * raft_uv instance and assert that at least MIN_ENTRIES entries survived,
+ * each carrying the payload the child wrote for its index. Mirrors
+ * ASSERT_ENTRIES, minus the fixture and the exact-count expectation: the
+ * child may have gotten one more append to disk between the last
+ * acknowledgement that the parent consumed and the kill. */
+static void durabilityAssertEntries(const char *dir, unsigned min_entries)
+{
+    struct uv_loop_s loop;
+    struct raft_uv_transport transport;
+    struct raft_io io;
+    raft_term term;
+    raft_id voted_for;
+    struct raft_snapshot *snapshot;
+    raft_index start_index;
+    struct raft_entry *entries;
+    size_t i;
+    size_t n;
+    void *batch = NULL;
+    int rv;
+
+    rv = uv_loop_init(&loop);
+    munit_assert_int(rv, ==, 0);
+    transport.version = 1;
+    rv = raft_uv_tcp_init(&transport, &loop);
+    munit_assert_int(rv, ==, 0);
+    rv = raft_uv_init(&io, &loop, dir, &transport);
+    munit_assert_int(rv, ==, 0);
+    rv = io.init(&io, 1, "1");
+    if (rv != 0) {
+        munit_errorf("io->init(): %s (%d)", io.errmsg, rv);
+    }
+    rv = io.load(&io, &term, &voted_for, &snapshot, &start_index, &entries,
+                 &n);
+    if (rv != 0) {
+        munit_errorf("io->load(): %s (%d)", io.errmsg, rv);
+    }
+    io.close(&io, NULL);
+    uv_run(&loop, UV_RUN_NOWAIT);
+    raft_uv_close(&io);
+    raft_uv_tcp_close(&transport);
+    uv_loop_close(&loop);
+
+    munit_assert_ptr_null(snapshot);
+    munit_assert_int(start_index, ==, 1);
+    munit_assert_int(n, >=, min_entries);
+    for (i = 0; i < n; i++) {
+        struct raft_entry *entry = &entries[i];
+        uint64_t value;
+        munit_assert_int(entry->term, ==, 1);
+        munit_assert_int(entry->type, ==, RAFT_COMMAND);
+        munit_assert_int(entry->buf.len, ==, DURABILITY_ENTRY_SIZE);
+        memcpy(&value, entry->buf.base, sizeof value);
+        munit_assert_int(value, ==, i);
+        munit_assert_ptr_not_null(entry->batch);
+    }
+    for (i = 0; i < n; i++) {
+        struct raft_entry *entry = &entries[i];
+        if (entry->batch != batch) {
+            batch = entry->batch;
+            raft_free(batch);
+        }
+    }
+    raft_free(entries);
+}
+
+/* Crash durability: every entry whose append callback has fired survives the
+ * abrupt death of the writing process, which gets no chance to flush or
+ * close anything. A child process appends entries one at a time on this
+ * test's directory and acknowledges each completed append over a pipe; after
+ * DURABILITY_ACKED_ENTRIES acknowledgements the parent kills the child
+ * outright (SIGKILL / TerminateProcess), then loads the directory with a
+ * fresh raft_uv instance and expects every acknowledged entry to be there,
+ * intact. This is the contract all three write backends must honor: Linux
+ * kernel-AIO (O_DIRECT|O_DSYNC), the portable threadpool backend
+ * (DQLITE_IO_BACKEND=threadpool, which fdatasyncs each write) and the
+ * Windows stack (write-through handle plus FlushFileBuffers after every
+ * write). Killing right after the acknowledgement is precisely the contract
+ * under test: do not add grace sleeps. */
+TEST(append, crashDurability, setUp, tearDownDeps, 0, NULL)
+{
+    struct fixture *f = data;
+
+    /* The child creates its own raft_uv instance on f->dir: shut down the
+     * fixture's instance first so the two never touch the directory
+     * concurrently. */
+    TEAR_DOWN_UV;
+
+#ifndef _WIN32
+    {
+        int fds[2];
+        pid_t pid;
+        int rv;
+
+        rv = pipe(fds);
+        munit_assert_int(rv, ==, 0);
+        pid = fork();
+        munit_assert_int(pid, >=, 0);
+        if (pid == 0) {
+            close(fds[0]);
+            durabilityChildRun(f->dir, fds[1]);
+            _exit(1); /* durabilityChildRun never returns */
+        }
+        close(fds[1]);
+        durabilityWaitAcks(fds[0], DURABILITY_ACKED_ENTRIES);
+        rv = kill(pid, SIGKILL);
+        munit_assert_int(rv, ==, 0);
+        waitpid(pid, NULL, 0);
+        close(fds[0]);
+    }
+#else
+    {
+        /* No fork() on Windows: spawn the CMake-built helper executable
+         * (test/tools/durability_child.c) that lives next to this test
+         * binary, with its stdout redirected to an anonymous pipe carrying
+         * the acknowledgement bytes. */
+        char exe[MAX_PATH];
+        char helper[MAX_PATH + 32];
+        char cmdline[MAX_PATH * 2];
+        char *slash;
+        DWORD len;
+        SECURITY_ATTRIBUTES sa;
+        HANDLE rd;
+        HANDLE wr;
+        STARTUPINFOA si;
+        PROCESS_INFORMATION pi;
+        BOOL ok;
+
+        len = GetModuleFileNameA(NULL, exe, sizeof exe);
+        munit_assert_true(len > 0 && len < sizeof exe);
+        slash = strrchr(exe, '\\');
+        munit_assert_ptr_not_null(slash);
+        *slash = '\0';
+        snprintf(helper, sizeof helper, "%s\\raft-durability-child.exe", exe);
+        if (GetFileAttributesA(helper) == INVALID_FILE_ATTRIBUTES) {
+            /* The helper is built by CMake only; a build that did not
+             * produce it cannot run the Windows arm. */
+            return MUNIT_SKIP;
+        }
+
+        memset(&sa, 0, sizeof sa);
+        sa.nLength = sizeof sa;
+        sa.bInheritHandle = TRUE;
+        ok = CreatePipe(&rd, &wr, &sa, 0);
+        munit_assert_true(ok);
+        /* Only the write end crosses into the child. */
+        ok = SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+        munit_assert_true(ok);
+
+        memset(&si, 0, sizeof si);
+        si.cb = sizeof si;
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        si.hStdOutput = wr;
+        si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        memset(&pi, 0, sizeof pi);
+        snprintf(cmdline, sizeof cmdline, "\"%s\" \"%s\" %d", helper, f->dir,
+                 DURABILITY_TOTAL_ENTRIES);
+        ok = CreateProcessA(helper, cmdline, NULL, NULL, TRUE, 0, NULL, NULL,
+                            &si, &pi);
+        if (!ok) {
+            munit_errorf("CreateProcess(%s): error %lu", helper,
+                         (unsigned long)GetLastError());
+        }
+        CloseHandle(wr); /* The child owns the write end now. */
+
+        durabilityWaitAcks(rd, DURABILITY_ACKED_ENTRIES);
+        ok = TerminateProcess(pi.hProcess, 1);
+        munit_assert_true(ok);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        CloseHandle(rd);
+    }
+#endif
+
+    durabilityAssertEntries(f->dir, DURABILITY_ACKED_ENTRIES);
+    return MUNIT_OK;
+}
 
 /*===========================================================================
   Test interaction between UvAppend and UvBarrier
