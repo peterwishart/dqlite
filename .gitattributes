@@ -1,0 +1,5 @@
+# test/portable-check.sh is a POSIX shell script that must keep LF line
+# endings even in working trees checked out with core.autocrlf=true (Windows),
+# or it cannot be executed under WSL/Linux. Scoped to just this script so no
+# repo-wide normalization rules are imposed.
+/test/portable-check.sh text eol=lf

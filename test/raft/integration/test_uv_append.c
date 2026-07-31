@@ -653,6 +653,13 @@ TEST(append, ioSetupError, setUp, tearDown, 0, NULL)
     }
     APPEND_FAILURE(1, 64, RAFT_TOOMANY,
                    "setup writer for open-1: AIO events user limit exceeded");
+    /* Release the exhausted AIO context right away instead of leaking it to
+     * process exit: the kernel frees a dead process' contexts asynchronously,
+     * so the fs.aio-nr limit can still look exhausted when the next test
+     * starts. With DQLITE_IO_NO_DIRECT=1 (see test/portable-check.sh) every
+     * buffered write needs a transient io_setup, which made the next test
+     * (append/barrierOpenSegments) fail deterministically with RAFT_TOOMANY. */
+    AioDestroy(ctx);
     return MUNIT_OK;
 }
 #endif /* DQLITE_HAVE_KAIO */

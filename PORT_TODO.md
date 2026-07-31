@@ -1575,7 +1575,20 @@ net additions. One marginal drop, several gaps.
       node/fsm/role_management 117/117, server 8/8 (**`stop_twice` PASSED in
       ~30s — the documented WSL hang did not reproduce**), stress 46/46
       (EXIT=0, full matrix, ~13-55s per case — data for T6).
-- [ ] **T3 — Exercise the portable paths in a default verification run.**
+- [x] **T3 — Exercise the portable paths in a default verification run.
+      DONE 2026-07-31.** New `test/portable-check.sh` (POSIX sh, LF-pinned
+      via a scoped `.gitattributes`, referenced from README): three passes
+      over the automake/CMake binaries with each switch, plus `-s` for a
+      combined-switch integration pass. Demo on a fresh WSL autotools build:
+      all passes green (threadpool 24/24+236/236, no-mremap 324/324,
+      no-direct 25/25+235/235, `-s` 51/51). Exercising the switches exposed
+      and fixed two real test bugs: `init/probeDirectIoOom`/`probeAsyncIoOom`
+      fault allocations the switch bypasses (env-gated skip added), and
+      `append/ioSetupError` leaked its exhausted AIO context, deterministically
+      failing the NEXT test under `DQLITE_IO_NO_DIRECT` (`AioDestroy` added;
+      default run unchanged 237/237). Note: the one-shot warnings fire per
+      process but munit replays captured stderr only on failure /
+      `--show-stderr` — documented in the script header. Was:
       The three env switches are read but never set by anything
       (`grep setenv/putenv test/` = empty; no CI): the threadpool writer
       backend (`src/raft/uv_writer.c:695-770`), the no-mremap VFS fallback

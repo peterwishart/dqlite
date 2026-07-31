@@ -210,6 +210,11 @@ build-win\raft-uv-unit-test.exe
 build-win\raft-uv-integration-test.exe
 ```
 
+On Linux, `sh test/portable-check.sh <build-dir>` re-runs the relevant test
+binaries with the portability switches (`DQLITE_IO_BACKEND=threadpool`,
+`DQLITE_VFS_NO_MREMAP=1`, `DQLITE_IO_NO_DIRECT=1`) so the portable code paths
+they gate are exercised.
+
 ### Durability on Windows
 
 On Linux, dqlite makes an acknowledged raft log entry crash-durable by writing

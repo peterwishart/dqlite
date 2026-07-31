@@ -150,6 +150,14 @@ TEST(init, probeDirectIoOom, setUp, tearDown, 0, NULL)
     /* XXX: fails on ppc64el */
     return MUNIT_SKIP;
 #endif
+    /* The DQLITE_IO_NO_DIRECT switch makes UvFsProbeCapabilities skip the
+     * direct I/O probe entirely, so the allocation this test faults never
+     * happens (see uvFsNoDirectIo in src/raft/uv_fs.c and
+     * test/portable-check.sh). */
+    if (getenv("DQLITE_IO_NO_DIRECT") != NULL &&
+        getenv("DQLITE_IO_NO_DIRECT")[0] != '\0') {
+        return MUNIT_SKIP;
+    }
     HeapFaultConfig(&f->heap, 1 /* delay */, 1 /* repeat */);
     HEAP_FAULT_ENABLE;
     INIT_ERROR(f->dir, RAFT_NOMEM, "probe Direct I/O: out of memory");
@@ -172,6 +180,13 @@ TEST(init, probeAsyncIoOom, setUp, tearDown, 0, NULL)
     /* XXX: fails on ppc64el */
     return MUNIT_SKIP;
 #endif
+    /* With DQLITE_IO_NO_DIRECT set, direct I/O is reported unavailable, so
+     * the async I/O probe (and the allocation this test faults) is skipped
+     * (see uvFsNoDirectIo in src/raft/uv_fs.c and test/portable-check.sh). */
+    if (getenv("DQLITE_IO_NO_DIRECT") != NULL &&
+        getenv("DQLITE_IO_NO_DIRECT")[0] != '\0') {
+        return MUNIT_SKIP;
+    }
     HeapFaultConfig(&f->heap, 2 /* delay */, 1 /* repeat */);
     HEAP_FAULT_ENABLE;
     INIT_ERROR(f->dir, RAFT_NOMEM, "probe Async I/O: out of memory");
