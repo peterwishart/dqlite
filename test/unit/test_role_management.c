@@ -372,6 +372,47 @@ TEST_CASE(adjust, promote_voter_tie_break, NULL)
 	return MUNIT_OK;
 }
 
+/* Fully-equivalent demotion candidates (same failure-domain count, weight,
+ * role and online state) are demoted in ascending node-id order. This pins the
+ * id tie-break in compareNodesForDemotion: only the substantive keys are
+ * negated relative to promotion, so equal candidates are still ordered
+ * lowest-id-first, matching the order upstream's stable glibc sort produces
+ * for ascending-id configurations. Node 4 is the local node, which is never
+ * demoted, so the candidates are nodes 1-3. */
+TEST_CASE(adjust, demote_voter_tie_break, NULL)
+{
+	(void)params;
+	TARGET(VOTERS(2), STANDBYS(0));
+	BEFORE(1, DQLITE_VOTER, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	BEFORE(2, DQLITE_VOTER, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	BEFORE(3, DQLITE_VOTER, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	BEFORE(4, DQLITE_VOTER, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	COMPUTE(4);
+	AFTER(1, DQLITE_SPARE);
+	AFTER(2, DQLITE_SPARE);
+	AFTER(3, DQLITE_VOTER);
+	AFTER(4, DQLITE_VOTER);
+	return MUNIT_OK;
+}
+
+/* Same as demote_voter_tie_break, but for the standby-demotion pass: among
+ * fully-equivalent standbys the ones with the lowest ids become spares. */
+TEST_CASE(adjust, demote_standby_tie_break, NULL)
+{
+	(void)params;
+	TARGET(VOTERS(1), STANDBYS(1));
+	BEFORE(1, DQLITE_VOTER, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	BEFORE(2, DQLITE_STANDBY, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	BEFORE(3, DQLITE_STANDBY, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	BEFORE(4, DQLITE_STANDBY, ONLINE, FAILURE_DOMAIN(1), WEIGHT(1));
+	COMPUTE(1);
+	AFTER(1, DQLITE_VOTER);
+	AFTER(2, DQLITE_SPARE);
+	AFTER(3, DQLITE_SPARE);
+	AFTER(4, DQLITE_STANDBY);
+	return MUNIT_OK;
+}
+
 /* Same as promote_voter_tie_break, but for the standby-promotion pass: among
  * fully-equivalent spares the ones with the lowest ids become standbys. */
 TEST_CASE(adjust, promote_standby_tie_break, NULL)

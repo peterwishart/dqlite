@@ -140,11 +140,13 @@ static void removeDomain(uint64_t domain, struct compare_data *data)
 	}
 }
 
-static int compareNodesForPromotion(const void *l, const void *r, void *p)
+/* Compare the substantive ranking keys of two nodes, in promotion order:
+ * better promotion candidates sort first. Returns 0 for fully-equivalent
+ * candidates; the callers below break that tie separately. */
+static int compareNodeKeys(const struct all_node_info *left,
+			   const struct all_node_info *right,
+			   struct compare_data *data)
 {
-	struct compare_data *data = p;
-	const struct all_node_info *left = l;
-	const struct all_node_info *right = r;
 	int result;
 
 	/* Nodes whose failure domains appear fewer times are preferred. */
@@ -163,28 +165,48 @@ static int compareNodesForPromotion(const void *l, const void *r, void *p)
 	/* We prefer to promote a standby rather than a spare. If
 	 * left->role > right->role, then right is more "senior" than left,
 	 * so we want right to come first, so return 1.*/
-	result = (left->role > right->role) - (left->role < right->role);
+	return (left->role > right->role) - (left->role < right->role);
+}
+
+/* Ascending-node-id tie-break, applied after compareNodeKeys to make both
+ * orderings total orders that are deterministic across platforms. Without
+ * this, the choice among fully-equivalent candidates depends on how the sort
+ * implementation handles equal elements: glibc's qsort_r is a stable merge
+ * sort (preserves input order), but MSVC's qsort_s is not stable, so the same
+ * input picked a different node on Windows. The callers build the input in
+ * ascending-id order, so lowest-id-first is exactly the order glibc's stable
+ * sort would keep, for promotion and demotion alike: Linux results are
+ * unchanged for promotion, and demotion of fully-equivalent candidates now
+ * explicitly picks the lowest id, matching upstream's stable-sort behaviour
+ * for ascending-id configurations. The tie-break must never be negated. */
+static int compareNodeIds(const struct all_node_info *left,
+			  const struct all_node_info *right)
+{
+	return (left->id > right->id) - (left->id < right->id);
+}
+
+static int compareNodesForPromotion(const void *l, const void *r, void *p)
+{
+	const struct all_node_info *left = l;
+	const struct all_node_info *right = r;
+	int result = compareNodeKeys(left, right, p);
 	if (result != 0) {
 		return result;
 	}
-
-	/* Final tie-break on node id, to make the ordering a total order that
-	 * is deterministic across platforms. Without this, fully-equivalent
-	 * candidates (same failure-domain count, weight and role) compare equal,
-	 * and the resulting choice depends on the sort implementation's handling
-	 * of "equal" elements: glibc's qsort_r is a stable merge sort (preserves
-	 * input order), but MSVC's qsort_s is not stable and orders equal
-	 * elements differently, so the same input picked a different node on
-	 * Windows. Ordering ties by ascending id reproduces the input order that
-	 * the callers build (ascending id), i.e. the exact order glibc's stable
-	 * sort would keep, so Linux results are unchanged. */
-	return (left->id > right->id) - (left->id < right->id);
+	return compareNodeIds(left, right);
 }
 
 static int compareNodesForDemotion(const void *l, const void *r, void *p)
 {
-	/* XXX */
-	return -compareNodesForPromotion(l, r, p);
+	const struct all_node_info *left = l;
+	const struct all_node_info *right = r;
+	/* Negate only the substantive keys: the worst node sorts first, but
+	 * equal candidates are still demoted in ascending-id order. */
+	int result = -compareNodeKeys(left, right, p);
+	if (result != 0) {
+		return result;
+	}
+	return compareNodeIds(left, right);
 }
 
 static void changeCb(struct raft_change *change, int status);

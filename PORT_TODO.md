@@ -1348,7 +1348,13 @@ behaviour change).
 
 ### 12.1 Correctness & behaviour (review findings, all re-verified in tree)
 
-- [ ] **R1 — Demotion tie order (review B-1, completes W6b).** The ascending-id
+- [x] **R1 — Demotion tie order (review B-1, completes W6b). DONE 2026-07-31.**
+      Substantive keys factored into `compareNodeKeys`; both comparators now
+      apply the ascending-id tie-break un-negated (demotion = `-keys` then
+      lowest-id-first, restoring upstream's stable-sort order). Two new tests
+      (`adjust/demote_voter_tie_break`, `adjust/demote_standby_tie_break`)
+      proven to fail against the old comparator on BOTH platforms. Windows
+      unit-test 323/323, Linux (WSL automake) 324/324, zero new warnings. The ascending-id
       tie-break in `compareNodesForPromotion` (`src/roles.c:166-181`) is negated
       by `compareNodesForDemotion` (`src/roles.c:184-188`, still `/* XXX */`),
       so among fully-equivalent candidates Linux now demotes the **highest** id
