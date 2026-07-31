@@ -304,7 +304,7 @@ function(dqlite_common_flags tgt)
   target_include_directories(${tgt} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   if(WIN32)
     # POSIX-compatibility shim headers (compat/win/): resolve <unistd.h>,
-    # <sys/socket.h>, <pthread.h>, ... to Win32/UCRT/Winsock equivalents WITHOUT
+    # <sys/socket.h>, <poll.h>, ... to Win32/UCRT/Winsock equivalents WITHOUT
     # editing the POSIX sources. This directory is added ONLY on Windows, so it
     # can never shadow the real system headers on Linux/macOS. The forced-include
     # prelude (/FI) fixes the winuser.h IN/OUT SAL cascade (see the header for

@@ -1450,7 +1450,12 @@ behaviour change).
       `:146-150`, `:161-165`. Both arms are byte-equivalent (`"@<id>"`), and
       the 8 attached comments assert a TCP-loopback behaviour that does not
       exist. Pure deletion, restores these files to upstream text.
-- [ ] **C3 — Collapse the 16× duplicated shadowing-fence boilerplate.** The
+- [x] **C3 — Collapse the 16× duplicated shadowing-fence boilerplate. DONE
+      2026-07-31.** One identical line per header now; net −80 lines; the
+      `#if`/`#error` mechanism byte-untouched. Prelude rationale made
+      self-contained (W3/S1 codes dropped) and its stale `<pthread.h>`
+      example fixed, along with the `CMakeLists.txt` `<pthread.h>` mention —
+      the straggler from C1's list. Windows unit-test 328/328. The
       same 6-line "Shadowing fence (PORT_TODO.md W3)…" block sits in all 16
       shim headers (~96 lines); the `#error` string below it says the same
       thing. Reduce to one line per header pointing at the full rationale in

@@ -40,14 +40,14 @@
 #endif
 
 /*
- * Shim fence (PORT_TODO.md W3). The compat/win directory holds POSIX shim
- * headers under GENERIC names (<pthread.h>, <unistd.h>, <sys/mman.h>, ...)
+ * Shim fence. The compat/win directory holds POSIX shim
+ * headers under GENERIC names (<unistd.h>, <poll.h>, <sys/mman.h>, ...)
  * and sits on the include path AHEAD of the vcpkg/system directories. Any
  * translation unit compiled with that include path -- including a third-party
  * dependency TU built inside a dqlite target -- that includes one of those
  * names would otherwise silently resolve to dqlite's declaration-only stubs,
- * or worse, to types (e.g. pthread_mutex_t) whose layout disagrees with a
- * real implementation: an ABI hazard the compiler cannot diagnose.
+ * or worse, to types whose layout disagrees with a real implementation: an
+ * ABI hazard the compiler cannot diagnose.
  *
  * DQLITE_WIN_COMPAT is the fence: it is defined HERE and only here, and this
  * prelude is force-included (clang-cl /FI, see CMakeLists.txt) as the very
@@ -56,7 +56,7 @@
  * macro is absent, so a TU compiled without dqlite's prelude that resolves
  * one of these names gets a hard build break instead of an invisible
  * mismatch. (The real fix -- taking the generic names off the include path
- * entirely -- is tracked as S1; dqlite's own sources hardcode plain
+ * entirely -- is still pending; dqlite's own sources hardcode plain
  * `#include <unistd.h>`-style lines that must keep resolving until then.)
  */
 #define DQLITE_WIN_COMPAT 1
