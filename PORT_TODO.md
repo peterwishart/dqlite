@@ -1660,10 +1660,18 @@ net additions. One marginal drop, several gaps.
       `find_package(Threads)`/`Threads::Threads` deliberately retained —
       libuv needs `-pthread` transitively on Linux and upstream configure.ac
       still runs `AX_PTHREAD`.
-- [ ] **P4 — VERIFY, defer the rest: `test/lib/fs.c`/`test/raft/lib/dir.c`
-      helpers** (§9 leftover). Full loopback-filesystem porting is not
-      feasible on Windows; just confirm the plain-dir/tmpdir parameter sets
-      run (not skip) on Windows and count them in the run books.
+- [x] **P4 — Windows dir-fixture audit. DONE 2026-07-31: plain-dir coverage
+      confirmed.** Every `dir-fs=*` fixture param skips identically on both
+      platforms without `RAFT_TMP_*`; every plain-dir test that runs on
+      Linux runs on Windows, except a fully-justified list (dlsym-based
+      ADDRINFO injection, `_WIN32`-gated invalidAddress params, /proc- and
+      chmod-dependent permission tests, KAIO-only compiled-out cases — all
+      catalogued in the audit). One small win landed: `UvFsCheckDir/notDir`
+      un-gated with a portable body (regular file instead of `/dev/null`,
+      same `!S_IFDIR` branch; snprintf-sized for gcc `-Werror`). Run-book
+      baselines: Windows raft-uv-unit **21/55 skip** (was 20/56),
+      raft-uv-integration **213/34 skip**; Linux 25/56 and 238/11.
+      Loopback-fs porting stays deferred (infeasible on Windows).
 - [ ] **DEFER — upstream-story decision (autotools vs CMake, §1)**: only
       matters when upstreaming resumes.
 - [ ] **DEFER — release-build fate of the three env switches (§11.4)**:

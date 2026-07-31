@@ -111,16 +111,18 @@ TEST(UvFsCheckDir, notDirPrefix, NULL, NULL, 0, NULL)
 }
 
 /* If the given path is not a directory, an error is returned. */
-TEST(UvFsCheckDir, notDir, NULL, NULL, 0, NULL)
+TEST(UvFsCheckDir, notDir, DirSetUp, DirTearDown, 0, NULL)
 {
-#ifdef _WIN32
-    /* Relies on the Linux-only device path /dev/null. */
-    return MUNIT_SKIP;
-#else
-    CHECK_DIR_ERROR("/dev/null", RAFT_INVALID,
-                    "path '/dev/null' is not a directory");
+    /* Upstream uses /dev/null here; a regular file exercises the same
+     * !S_IFDIR branch of UvFsCheckDir and also works on Windows. */
+    const char *dir = data;
+    char path[256];
+    char errmsg[512];
+    DirWriteFileWithZeros(dir, "not-a-dir", 8);
+    snprintf(path, sizeof path, "%s/not-a-dir", dir);
+    snprintf(errmsg, sizeof errmsg, "path '%s' is not a directory", path);
+    CHECK_DIR_ERROR(path, RAFT_INVALID, errmsg);
     return MUNIT_OK;
-#endif
 }
 
 /* If the given directory is not writable, an error is returned. */
