@@ -183,7 +183,7 @@ void progressSetFeatures(struct raft *r,
 	r->leader_state.progress[i].features = features;
 }
 
-inline raft_flags progressGetFeatures(struct raft *r, const unsigned i)
+raft_flags progressGetFeatures(struct raft *r, const unsigned i)
 {
 	return r->leader_state.progress[i].features;
 }
